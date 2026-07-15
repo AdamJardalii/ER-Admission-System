@@ -12,6 +12,7 @@ import type {
   AuditEvent,
   TriageLevel,
   TriageAssessment,
+  VitalsSet,
 } from "../types";
 
 function useLiveQuery<T>(query: () => Promise<T>, deps: unknown[], initial: T): T {
@@ -41,7 +42,7 @@ export function useAllActiveEncounters(): EncounterView[] {
       const encounters = await db.encounters
         .filter(
           (e) =>
-            !["closed", "left_without_being_seen", "transferred_out", "absconded", "died_before_treatment"].includes(
+            !["closed", "discharged", "left_without_being_seen", "left_against_medical_advice", "transferred", "transferred_out", "absconded", "died_before_treatment", "deceased"].includes(
               e.state,
             ),
         )
@@ -125,6 +126,56 @@ export function useClinicalEvents(encounterId: string | undefined): ClinicalEven
         .equals(encounterId)
         .toArray();
       return rows.sort((a, b) => b.recordedAt - a.recordedAt);
+    },
+    [encounterId],
+    [],
+  );
+}
+
+export function useAllPatients(): Patient[] {
+  return useLiveQuery(() => db.patients.toArray(), [], []);
+}
+
+export function useIncompleteRegistrations(): Patient[] {
+  return useLiveQuery(
+    async () => {
+      const rows = await db.patients.toArray();
+      return rows
+        .filter((patient) => !patient.displayNumber.startsWith("#B-"))
+        .filter((patient) => patient.registrationComplete === false && !patient.mergedIntoPatientId)
+        .sort((a, b) => b.createdAt - a.createdAt);
+    },
+    [],
+    [],
+  );
+}
+
+export function useVitalsSets(encounterId: string | undefined): VitalsSet[] {
+  return useLiveQuery(
+    async () => {
+      if (!encounterId) return [];
+      const rows = await db.vitalsSets.where("encounterId").equals(encounterId).toArray();
+      return rows.filter((row) => !row.voidedAt).sort((a, b) => b.recordedAt - a.recordedAt);
+    },
+    [encounterId],
+    [],
+  );
+}
+
+export function useAllVitalsSets(): VitalsSet[] {
+  return useLiveQuery(
+    async () => (await db.vitalsSets.orderBy("recordedAt").reverse().toArray()).filter((row) => !row.voidedAt),
+    [],
+    [],
+  );
+}
+
+export function useStateTransitions(encounterId: string | undefined) {
+  return useLiveQuery(
+    async () => {
+      if (!encounterId) return [];
+      const rows = await db.stateTransitions.where("encounterId").equals(encounterId).toArray();
+      return rows.sort((a, b) => b.timestamp - a.timestamp);
     },
     [encounterId],
     [],

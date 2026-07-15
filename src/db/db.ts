@@ -6,6 +6,12 @@ import type {
   LocationAssignment,
   ClinicalEvent,
   AuditEvent,
+  PatientIdentifier,
+  VitalsSet,
+  ReferenceRange,
+  VitalsSchedule,
+  MergeRecord,
+  StateTransition,
   Incident,
   ReconciliationItem,
   Bed,
@@ -19,6 +25,12 @@ export const db = new Dexie("er-system") as Dexie & {
   locationAssignments: EntityTable<LocationAssignment, "id">;
   clinicalEvents: EntityTable<ClinicalEvent, "id">;
   auditEvents: EntityTable<AuditEvent, "id">;
+  patientIdentifiers: EntityTable<PatientIdentifier, "id">;
+  vitalsSets: EntityTable<VitalsSet, "id">;
+  referenceRanges: EntityTable<ReferenceRange, "id">;
+  vitalsSchedules: EntityTable<VitalsSchedule, "id">;
+  mergeRecords: EntityTable<MergeRecord, "id">;
+  stateTransitions: EntityTable<StateTransition, "id">;
   incidents: EntityTable<Incident, "id">;
   reconciliationItems: EntityTable<ReconciliationItem, "id">;
   beds: EntityTable<Bed, "id">;
@@ -42,4 +54,19 @@ db.version(1).stores({
 db.version(2).stores({
   patients: "id, displayNumber, mrn, identityStatus, createdAt",
   encounters: "id, caseNumber, patientId, incidentId, modeAtCreation, state, arrivedAt",
+});
+
+db.version(3).stores({
+  patients: "id, displayNumber, mrn, identityStatus, registrationComplete, mergedIntoPatientId, createdAt",
+  patientIdentifiers: "id, patientId, type, value",
+  vitalsSets: "id, encounterId, patientId, recordedAt, news2, source",
+  referenceRanges: "id, parameter",
+  vitalsSchedules: "id, context, level",
+  mergeRecords: "id, survivorPatientId, sourcePatientId, mergedAt, undoneAt",
+});
+
+db.version(4).stores({
+  encounters: "id, caseNumber, patientId, incidentId, modeAtCreation, pathway, state, arrivedAt",
+  vitalsSets: "id, encounterId, patientId, recordedAt, news2, source, voidedAt",
+  stateTransitions: "id, encounterId, timestamp, newState",
 });

@@ -14,13 +14,16 @@ import {
   useAlerts,
   useAllActiveEncounters,
   useAllEncounters,
+  useAllVitalsSets,
   useBeds,
+  useIncompleteRegistrations,
   useZones,
 } from "../../db/hooks";
 import { sortQueue } from "../../lib/sortQueue";
 import { QueueTable } from "../../components/QueueTable";
 import { TriageBadge } from "../../components/TriageBadge";
 import { isOverdue, triagePalette } from "../../lib/triage";
+import { latestVitals, isVitalsOverdue } from "../../lib/vitals";
 import type { EncounterState, EsiLevel } from "../../types";
 
 const WAITING_STATES: EncounterState[] = ["arrived", "registered", "triaged", "waiting"];
@@ -36,6 +39,8 @@ export function Dashboard() {
   const allEncounters = useAllEncounters();
   const beds = useBeds();
   const zones = useZones();
+  const incompleteRegistrations = useIncompleteRegistrations();
+  const allVitals = useAllVitalsSets();
   const alerts = useAlerts();
   const navigate = useNavigate();
   const now = useNow();
@@ -59,6 +64,10 @@ export function Dashboard() {
     level,
     count: activeEncounters.filter((row) => row.triage === level).length,
   }));
+  const vitalsDueCount = activeEncounters.filter((row) => {
+    const latest = latestVitals(allVitals.filter((vitals) => vitals.encounterId === row.encounter.id));
+    return isVitalsOverdue(latest?.recordedAt ?? null, row.triage, now);
+  }).length;
 
   return (
     <div className="mx-auto max-w-[1600px] space-y-2 p-2.5 max-[680px]:p-2">
@@ -78,13 +87,15 @@ export function Dashboard() {
         </button>
       </div>
 
-      <div className="grid grid-cols-6 gap-1.5 max-[1180px]:grid-cols-3 max-[680px]:grid-cols-2">
+      <div className="grid grid-cols-8 gap-1.5 max-[1380px]:grid-cols-4 max-[760px]:grid-cols-2">
         <MetricCard icon={UsersRound} label="Waiting now" value={String(waitingRows.length)} context={`${overdue} overdue`} accent="var(--color-primary)" />
         <MetricCard icon={Clock3} label="Average wait" value={formatMinutes(averageWait)} context="Current waiting patients" accent="var(--color-teal-solid)" />
         <MetricCard icon={Timer} label="Longest wait" value={formatMinutes(longestWait)} context={waitingRows[0]?.patient.name ?? waitingRows[0]?.patient.displayNumber ?? "No queue"} accent="var(--color-yellow-solid)" />
         <MetricCard icon={Activity} label="In treatment" value={String(inTreatment)} context={`${activeEncounters.length} active encounters`} accent="var(--color-green-solid)" />
         <MetricCard icon={BedDouble} label="Bed occupancy" value={`${occupancy}%`} context={`${beds.length - occupiedBeds} beds open`} accent={occupancy >= 85 ? "var(--color-red-solid)" : "var(--color-primary)"} />
         <MetricCard icon={Route} label="Disposition pending" value={String(pendingDisposition)} context="Admission, transfer, discharge" accent="var(--color-purple-ai)" />
+        <MetricCard icon={UsersRound} label="Incomplete regs" value={String(incompleteRegistrations.length)} context="Complete later worklist" accent="var(--color-yellow-solid)" onClick={() => navigate("/patients")} />
+        <MetricCard icon={Activity} label="Vitals due" value={String(vitalsDueCount)} context={vitalsDueCount > 3 ? "Dashboard alert active" : "Repeat schedule"} accent={vitalsDueCount > 3 ? "var(--color-red-solid)" : "var(--color-teal-solid)"} onClick={() => navigate("/vitals-due")} />
       </div>
 
       <div className="grid grid-cols-[1.15fr_0.82fr_1fr] gap-2 max-[1080px]:grid-cols-2 max-[760px]:grid-cols-1">
@@ -171,8 +182,8 @@ export function Dashboard() {
           </section>
 
           <section className="card px-2.5 py-2">
-            <SectionHeader title="Operational alerts" detail={`${alerts.length} active`} />
-            {alerts.length === 0 ? (
+            <SectionHeader title="Operational alerts" detail={`${alerts.length + (vitalsDueCount > 3 ? 1 : 0) + (incompleteRegistrations.length > 0 ? 1 : 0)} active`} />
+            {alerts.length === 0 && vitalsDueCount <= 3 && incompleteRegistrations.length === 0 ? (
               <p className="text-sm text-[var(--color-ink-secondary)]">No active alerts.</p>
             ) : (
               <div className="space-y-1">
@@ -182,6 +193,18 @@ export function Dashboard() {
                     <span>{alert.newValue}</span>
                   </div>
                 ))}
+                {vitalsDueCount > 3 && (
+                  <button onClick={() => navigate("/vitals-due")} className="flex w-full items-start gap-2 rounded-md text-left text-sm text-[var(--color-red-solid)]">
+                    <AlertCircle size={15} className="mt-0.5 shrink-0" />
+                    <span>{vitalsDueCount} patients overdue for repeat vitals</span>
+                  </button>
+                )}
+                {incompleteRegistrations.length > 0 && (
+                  <button onClick={() => navigate("/patients")} className="flex w-full items-start gap-2 rounded-md text-left text-sm">
+                    <AlertCircle size={15} className="mt-0.5 shrink-0 text-[var(--color-yellow-solid)]" />
+                    <span>Incomplete registrations: {incompleteRegistrations.length}</span>
+                  </button>
+                )}
               </div>
             )}
           </section>
@@ -197,21 +220,24 @@ function MetricCard({
   value,
   context,
   accent,
+  onClick,
 }: {
   icon: ComponentType<{ size?: number; className?: string }>;
   label: string;
   value: string;
   context: string;
   accent: string;
+  onClick?: () => void;
 }) {
+  const Tag = onClick ? "button" : "div";
   return (
-    <div className="card min-w-0 border-l-4 px-2.5 py-2" style={{ borderLeftColor: accent }}>
+    <Tag type={onClick ? "button" : undefined} onClick={onClick} className="card min-w-0 border-l-4 px-2.5 py-2 text-left" style={{ borderLeftColor: accent }}>
       <div className="mb-0.5 flex items-center gap-1.5 text-xs font-bold uppercase text-[var(--color-ink-secondary)]">
         <Icon size={14} /> {label}
       </div>
       <div className="truncate text-[24px] font-semibold leading-none" style={{ color: accent }}>{value}</div>
       <div className="mt-0.5 truncate text-xs text-[var(--color-ink-secondary)]" title={context}>{context}</div>
-    </div>
+    </Tag>
   );
 }
 

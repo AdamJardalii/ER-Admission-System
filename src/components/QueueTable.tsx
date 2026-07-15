@@ -1,6 +1,8 @@
 import { useNavigate } from "react-router-dom";
 import { TriageBadge } from "./TriageBadge";
 import { formatWait, isOverdue } from "../lib/triage";
+import { useAllVitalsSets } from "../db/hooks";
+import { latestVitals } from "../lib/vitals";
 import type { EncounterView } from "../db/hooks";
 
 const STATE_LABEL: Record<string, string> = {
@@ -8,17 +10,34 @@ const STATE_LABEL: Record<string, string> = {
   registered: "Registered",
   triaged: "Triaged",
   waiting: "Waiting",
+  assigned: "Assigned",
+  in_assessment: "In assessment",
+  orders_pending: "Orders pending",
   in_treatment: "In treatment",
+  reassessment_required: "Reassessment required",
   observation: "Observation",
   admission_pending: "Waiting for admission",
+  waiting_for_specialty_acceptance: "Waiting for specialty",
+  waiting_for_bed: "Waiting for bed",
+  waiting_for_transport: "Waiting for transport",
   transfer_pending: "Transfer pending",
   discharge_pending: "Discharge pending",
   disposition_pending: "Disposition pending",
+  disposition_decided: "Disposition decided",
+  fast_track: "Fast-track",
+  resuscitation: "Resuscitation",
+  discharged: "Discharged",
+  left_against_medical_advice: "Left against advice",
+  transferred: "Transferred",
+  deceased: "Deceased",
+  identity_pending: "Identity pending",
+  reconciliation_pending: "Reconciliation pending",
   unknown_status: "Unknown",
 };
 
 export function QueueTable({ rows, compact = false }: { rows: EncounterView[]; compact?: boolean }) {
   const navigate = useNavigate();
+  const allVitals = useAllVitalsSets();
   const cellSpacing = compact ? "px-2 py-1" : "px-2 py-1.5";
 
   if (rows.length === 0) {
@@ -43,6 +62,7 @@ export function QueueTable({ rows, compact = false }: { rows: EncounterView[]; c
       <tbody>
         {rows.map((row) => {
           const overdue = isOverdue(row.triage, row.encounter.arrivedAt);
+          const latest = latestVitals(allVitals.filter((vitals) => vitals.encounterId === row.encounter.id));
           return (
             <tr
               key={row.encounter.id}
@@ -53,7 +73,10 @@ export function QueueTable({ rows, compact = false }: { rows: EncounterView[]; c
                 <TriageBadge level={row.triage} size="sm" />
               </td>
               <td className={cellSpacing}>
-                <div className="font-medium">{row.patient.name ?? row.patient.displayNumber}</div>
+                <div className="flex items-center gap-1.5 font-medium">
+                  {latest && latest.news2 >= 7 && <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-[var(--color-red-solid)]" title={`NEWS2 ${latest.news2}`} />}
+                  {row.patient.name ?? row.patient.displayNumber}
+                </div>
                 <div className="text-xs text-[var(--color-ink-secondary)]">
                   {row.patient.mrn ?? row.patient.displayNumber} | {row.encounter.caseNumber ?? row.encounter.id.slice(0, 8)}
                 </div>

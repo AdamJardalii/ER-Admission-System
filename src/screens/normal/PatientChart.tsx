@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
-import { QrCode, X } from "lucide-react";
+import { useParams, useSearchParams } from "react-router-dom";
+import { Clock3, QrCode, X } from "lucide-react";
 import {
   useEncounterView,
   useClinicalEvents,
   useAuditEvents,
+  useVitalsSets,
+  useAllPatients,
+  useStateTransitions,
 } from "../../db/hooks";
 import { TriageBadge } from "../../components/TriageBadge";
 import { AiChip } from "../../components/AiChip";
@@ -24,13 +27,24 @@ import {
   addAllergy,
   removeAllergy,
   setTriage,
-  addClinicalEvent,
+  completeRegistration,
+  mergePatientRecords,
+  setEncounterPathway,
 } from "../../db/repo";
 import { useAppStore } from "../../store/useAppStore";
 import { triageRank, isEsi } from "../../lib/triage";
-import type { EsiLevel } from "../../types";
+import { fuzzyPatientMatches } from "../../lib/registration";
+import { latestVitals } from "../../lib/vitals";
+import {
+  News2Banner,
+  TriageVitalsAdvisory,
+  VitalsCaptureForm,
+  VitalsFlowsheet,
+  VitalsHeader,
+} from "../../components/VitalsPanel";
+import type { EsiLevel, Patient } from "../../types";
 
-const TABS = ["Journey", "Overview", "Assessment", "Orders", "Care", "Triage", "Disposition", "Notes", "Visits", "History"] as const;
+const TABS = ["Journey", "Overview", "Assessment", "Orders", "Care", "Vitals", "Triage", "Disposition", "Notes", "Visits", "History"] as const;
 type Tab = (typeof TABS)[number];
 
 const ESI_DESCRIPTIONS: Record<EsiLevel, string> = {
@@ -43,10 +57,14 @@ const ESI_DESCRIPTIONS: Record<EsiLevel, string> = {
 
 export function PatientChart() {
   const { encounterId } = useParams<{ encounterId: string }>();
+  const [searchParams] = useSearchParams();
   const view = useEncounterView(encounterId);
-  const [tab, setTab] = useState<Tab>("Journey");
+  const requestedTab = searchParams.get("tab");
+  const [tab, setTab] = useState<Tab>(TABS.includes(requestedTab as Tab) ? requestedTab as Tab : "Journey");
   const [retriageOpen, setRetriageOpen] = useState(false);
   const [identityOpen, setIdentityOpen] = useState(false);
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const vitalsSets = useVitalsSets(encounterId);
 
   if (!view) {
     return <div className="p-3 text-sm text-[var(--color-ink-secondary)]">Patient not found.</div>;
@@ -74,6 +92,18 @@ export function PatientChart() {
             <span className="font-semibold">{patient.name ?? "Unknown"}</span>
             <span className="text-sm font-semibold text-[var(--color-primary)]">{patient.mrn ?? patient.displayNumber}</span>
             <span className="text-sm text-[var(--color-ink-secondary)]">Case {encounter.caseNumber ?? encounter.id.slice(0, 8)}</span>
+            <span className="rounded-full bg-[var(--color-surface-muted)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-ink-secondary)]">
+              {(encounter.pathway ?? (encounter.modeAtCreation === "catastrophe" ? "catastrophe" : "standard")).replace(/_/g, " ")}
+            </span>
+            {patient.registrationComplete === false && (
+              <button
+                className="inline-flex items-center gap-1 rounded-full bg-[var(--color-yellow-tint)] px-2 py-0.5 text-xs font-bold text-[var(--color-yellow-text)]"
+                onClick={() => setTab("Overview")}
+                title="Open full registration"
+              >
+                <Clock3 size={13} /> Registration incomplete
+              </button>
+            )}
             {patient.dateOfBirth && (
               <span className="text-sm text-[var(--color-ink-secondary)]">
                 | {ageFromDob(patient.dateOfBirth)}y
@@ -99,6 +129,12 @@ export function PatientChart() {
         </button>
         <button
           className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm"
+          onClick={() => setMergeOpen(true)}
+        >
+          Merge
+        </button>
+        <button
+          className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm"
           onClick={() => setRetriageOpen(true)}
         >
           Re-triage
@@ -111,6 +147,9 @@ export function PatientChart() {
           Disposition
         </button>
       </div>
+
+      <News2Banner latest={latestVitals(vitalsSets)} onRetriage={() => setRetriageOpen(true)} />
+      <VitalsHeader sets={vitalsSets} triage={triage} />
 
       <div className="flex gap-1 overflow-x-auto border-b border-[var(--color-border)]">
         {TABS.map((t) => (
@@ -133,7 +172,8 @@ export function PatientChart() {
       {tab === "Assessment" && <AssessmentWorkflow encounterId={encounter.id} />}
       {tab === "Orders" && <OrdersWorkflow encounterId={encounter.id} />}
       {tab === "Care" && <CareWorkflow encounterId={encounter.id} />}
-      {tab === "Triage" && <TriageHistory encounterId={encounter.id} />}
+      {tab === "Vitals" && <VitalsTab encounterId={encounter.id} sets={vitalsSets} />}
+      {tab === "Triage" && <TriageTab encounterId={encounter.id} currentLevel={triage} latest={latestVitals(vitalsSets)} />}
       {tab === "Disposition" && <DispositionWorkflow encounterId={encounter.id} />}
       {tab === "Notes" && <NotesTab encounterId={encounter.id} />}
       {tab === "Visits" && <PatientVisits patientId={patient.id} currentEncounterId={encounter.id} />}
@@ -154,6 +194,7 @@ export function PatientChart() {
           onClose={() => setIdentityOpen(false)}
         />
       )}
+      {mergeOpen && <MergeModal survivor={patient} onClose={() => setMergeOpen(false)} />}
     </div>
   );
 }
@@ -173,20 +214,13 @@ type PatientDetailsSection = (typeof PATIENT_DETAILS_SECTIONS)[number];
 function OverviewTab({ encounterId, patientId }: { encounterId: string; patientId: string }) {
   const view = useEncounterView(encounterId);
   const events = useClinicalEvents(encounterId);
+  const vitalsSets = useVitalsSets(encounterId);
   const mode = useAppStore((s) => s.mode);
   const [newAllergy, setNewAllergy] = useState("");
   const [detailsSection, setDetailsSection] = useState<PatientDetailsSection>("Basic");
 
   if (!view) return null;
   const { patient, encounter } = view;
-
-  const vitalsEvent = events.find((e) => e.type === "vitals");
-  const vitals = (vitalsEvent?.content ?? {}) as {
-    bp?: string;
-    hr?: number;
-    spo2?: number;
-    temp?: string;
-  };
 
   const recentEvents = events.slice(0, 6);
 
@@ -224,33 +258,33 @@ function OverviewTab({ encounterId, patientId }: { encounterId: string; patientI
           {detailsSection === "Basic" && (
             <div className="grid grid-cols-2 gap-3 max-[560px]:grid-cols-1">
               <div className="col-span-2 max-[560px]:col-span-1">
-                <EditableField label="Name" value={patient.name ?? ""} onSave={(v) => updatePatientField(patientId, "name", v || null, mode)} />
+                <EditableField label="Name" value={patient.name ?? ""} historyEntityId={patientId} historyField="name" onSave={(v) => updatePatientField(patientId, "name", v || null, mode)} />
               </div>
-              <EditableField label="Date of birth" type="date" value={patient.dateOfBirth ?? ""} onSave={(v) => updatePatientField(patientId, "dateOfBirth", v || null, mode)} />
+              <EditableField label="Date of birth" type="date" value={patient.dateOfBirth ?? ""} historyEntityId={patientId} historyField="dateOfBirth" onSave={(v) => updatePatientField(patientId, "dateOfBirth", v || null, mode)} />
               <SelectField label="Sex" value={patient.sex ?? "unknown"} options={["male", "female", "unknown"]} onSave={(v) => updatePatientField(patientId, "sex", v, mode)} />
-              <EditableField label="Phone" value={patient.phone ?? ""} onSave={(v) => updatePatientField(patientId, "phone", v || null, mode)} />
-              <EditableField label="Blood group" value={patient.bloodGroup ?? ""} onSave={(v) => updatePatientField(patientId, "bloodGroup", v || null, mode)} />
+              <EditableField label="Phone" value={patient.phone ?? ""} historyEntityId={patientId} historyField="phone" onSave={(v) => updatePatientField(patientId, "phone", v || null, mode)} />
+              <EditableField label="Blood group" value={patient.bloodGroup ?? ""} historyEntityId={patientId} historyField="bloodGroup" onSave={(v) => updatePatientField(patientId, "bloodGroup", v || null, mode)} />
             </div>
           )}
 
           {detailsSection === "Contact" && (
             <div className="grid grid-cols-2 gap-3 max-[560px]:grid-cols-1">
-              <EditableField label="National ID" value={patient.nationalId ?? ""} onSave={(v) => updatePatientField(patientId, "nationalId", v || null, mode)} />
-              <EditableField label="Nationality" value={patient.nationality ?? ""} onSave={(v) => updatePatientField(patientId, "nationality", v || null, mode)} />
-              <EditableField label="Email" type="email" value={patient.email ?? ""} onSave={(v) => updatePatientField(patientId, "email", v || null, mode)} />
-              <EditableField label="Preferred language" value={patient.preferredLanguage ?? ""} onSave={(v) => updatePatientField(patientId, "preferredLanguage", v || null, mode)} />
-              <EditableField label="Address" value={patient.address ?? ""} onSave={(v) => updatePatientField(patientId, "address", v || null, mode)} />
-              <EditableField label="City / district" value={patient.city ?? ""} onSave={(v) => updatePatientField(patientId, "city", v || null, mode)} />
+              <EditableField label="National ID" value={patient.nationalId ?? ""} historyEntityId={patientId} historyField="nationalId" onSave={(v) => updatePatientField(patientId, "nationalId", v || null, mode)} />
+              <EditableField label="Nationality" value={patient.nationality ?? ""} historyEntityId={patientId} historyField="nationality" onSave={(v) => updatePatientField(patientId, "nationality", v || null, mode)} />
+              <EditableField label="Email" type="email" value={patient.email ?? ""} historyEntityId={patientId} historyField="email" onSave={(v) => updatePatientField(patientId, "email", v || null, mode)} />
+              <EditableField label="Preferred language" value={patient.preferredLanguage ?? ""} historyEntityId={patientId} historyField="preferredLanguage" onSave={(v) => updatePatientField(patientId, "preferredLanguage", v || null, mode)} />
+              <EditableField label="Address" value={patient.address ?? ""} historyEntityId={patientId} historyField="address" onSave={(v) => updatePatientField(patientId, "address", v || null, mode)} />
+              <EditableField label="City / district" value={patient.city ?? ""} historyEntityId={patientId} historyField="city" onSave={(v) => updatePatientField(patientId, "city", v || null, mode)} />
             </div>
           )}
 
           {detailsSection === "Emergency" && (
             <div className="grid grid-cols-2 gap-3 max-[560px]:grid-cols-1">
-              <EditableField label="Contact name" value={patient.emergencyContactName ?? patient.emergencyContact ?? ""} onSave={(v) => updatePatientField(patientId, "emergencyContactName", v || null, mode)} />
-              <EditableField label="Relationship" value={patient.emergencyContactRelationship ?? ""} onSave={(v) => updatePatientField(patientId, "emergencyContactRelationship", v || null, mode)} />
-              <EditableField label="Contact phone" value={patient.emergencyContactPhone ?? ""} onSave={(v) => updatePatientField(patientId, "emergencyContactPhone", v || null, mode)} />
-              <EditableField label="Insurance provider" value={patient.insuranceProvider ?? patient.insurance ?? ""} onSave={(v) => updatePatientField(patientId, "insuranceProvider", v || null, mode)} />
-              <EditableField label="Policy / member number" value={patient.insurancePolicyNumber ?? ""} onSave={(v) => updatePatientField(patientId, "insurancePolicyNumber", v || null, mode)} />
+              <EditableField label="Contact name" value={patient.emergencyContactName ?? patient.emergencyContact ?? ""} historyEntityId={patientId} historyField="emergencyContactName" onSave={(v) => updatePatientField(patientId, "emergencyContactName", v || null, mode)} />
+              <EditableField label="Relationship" value={patient.emergencyContactRelationship ?? ""} historyEntityId={patientId} historyField="emergencyContactRelationship" onSave={(v) => updatePatientField(patientId, "emergencyContactRelationship", v || null, mode)} />
+              <EditableField label="Contact phone" value={patient.emergencyContactPhone ?? ""} historyEntityId={patientId} historyField="emergencyContactPhone" onSave={(v) => updatePatientField(patientId, "emergencyContactPhone", v || null, mode)} />
+              <EditableField label="Insurance provider" value={patient.insuranceProvider ?? patient.insurance ?? ""} historyEntityId={patientId} historyField="insuranceProvider" onSave={(v) => updatePatientField(patientId, "insuranceProvider", v || null, mode)} />
+              <EditableField label="Policy / member number" value={patient.insurancePolicyNumber ?? ""} historyEntityId={patientId} historyField="insurancePolicyNumber" onSave={(v) => updatePatientField(patientId, "insurancePolicyNumber", v || null, mode)} />
             </div>
           )}
 
@@ -292,37 +326,27 @@ function OverviewTab({ encounterId, patientId }: { encounterId: string; patientI
               <TextAreaField label="Chief complaint" value={encounter.chiefComplaint ?? ""} onSave={(v) => updateEncounterField(encounterId, "chiefComplaint", v || null, mode)} />
             </div>
           )}
+
+          {patient.registrationComplete === false && (
+            <button
+              type="button"
+              onClick={() => void completeRegistration(patientId, {}, encounterId, mode)}
+              className="inline-flex rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-semibold text-white"
+            >
+              Mark registration complete
+            </button>
+          )}
         </div>
       </div>
 
       <div className="space-y-3">
+        <VitalsHeader sets={vitalsSets} triage={view.triage} />
         <div className="card">
           <div className="mb-2 flex items-center justify-between">
             <h2 className="text-sm font-semibold">Latest vitals</h2>
-            <button
-              className="rounded-md border border-[var(--color-border)] px-2 py-1 text-xs"
-              onClick={() =>
-                addClinicalEvent(
-                  encounterId,
-                  "vitals",
-                  {
-                    bp: "120/80",
-                    hr: 78,
-                    spo2: 98,
-                    temp: "37.0",
-                  },
-                  null,
-                )
-              }
-            >
-              Record vitals
-            </button>
           </div>
-          <div className="grid grid-cols-4 gap-2">
-            <VitalStat label="BP" value={vitals.bp ?? "-"} />
-            <VitalStat label="HR" value={vitals.hr ? String(vitals.hr) : "-"} />
-            <VitalStat label="SpO2" value={vitals.spo2 ? `${vitals.spo2}%` : "-"} />
-            <VitalStat label="Temp" value={vitals.temp ? `${vitals.temp}°` : "-"} />
+          <div className="text-sm text-[var(--color-ink-secondary)]">
+            Structured vitals are shown in the live header above.
           </div>
         </div>
 
@@ -344,15 +368,6 @@ function OverviewTab({ encounterId, patientId }: { encounterId: string; patientI
           )}
         </div>
       </div>
-    </div>
-  );
-}
-
-function VitalStat({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <div className="mb-0.5 text-xs font-semibold uppercase text-[var(--color-ink-secondary)]">{label}</div>
-      <div className="text-lg font-semibold">{value}</div>
     </div>
   );
 }
@@ -388,15 +403,32 @@ function useDebouncedSave(value: string, local: string, onSave: SaveFn) {
   return saveState;
 }
 
-function FieldLabel({ label, saveState }: { label: string; saveState: SaveState }) {
+function FieldLabel({
+  label,
+  saveState,
+  historyCount,
+  onHistory,
+}: {
+  label: string;
+  saveState: SaveState;
+  historyCount?: number;
+  onHistory?: () => void;
+}) {
   return (
     <div className="mb-1 flex items-center justify-between gap-2">
       <span className="text-xs font-semibold uppercase text-[var(--color-ink-secondary)]">{label}</span>
-      {saveState !== "idle" && (
-        <span className="text-xs font-semibold uppercase text-[var(--color-primary)]">
-          {saveState === "saving" ? "Saving" : "Saved"}
-        </span>
-      )}
+      <span className="flex items-center gap-1">
+        {onHistory && (
+          <button type="button" onClick={onHistory} className="inline-flex items-center rounded px-1 text-[var(--color-ink-secondary)]" title={`${historyCount ?? 0} field changes`}>
+            <Clock3 size={13} />
+          </button>
+        )}
+        {saveState !== "idle" && (
+          <span className="text-xs font-semibold uppercase text-[var(--color-primary)]">
+            {saveState === "saving" ? "Saving" : "Saved"}
+          </span>
+        )}
+      </span>
     </div>
   );
 }
@@ -406,14 +438,21 @@ function EditableField({
   value,
   onSave,
   type = "text",
+  historyEntityId,
+  historyField,
 }: {
   label: string;
   value: string;
   onSave: SaveFn;
   type?: string;
+  historyEntityId?: string;
+  historyField?: string;
 }) {
   const [local, setLocal] = useState(value);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const saveState = useDebouncedSave(value, local, onSave);
+  const audits = useAuditEvents(historyEntityId);
+  const fieldAudits = historyField ? audits.filter((audit) => audit.action === `field_updated:${historyField}`) : [];
 
   useEffect(() => {
     setLocal(value);
@@ -421,13 +460,26 @@ function EditableField({
 
   return (
     <label className="block">
-      <FieldLabel label={label} saveState={saveState} />
+      <FieldLabel label={label} saveState={saveState} historyCount={fieldAudits.length} onHistory={historyField ? () => setHistoryOpen((value) => !value) : undefined} />
       <input
         type={type}
         value={local}
         onChange={(e) => setLocal(e.target.value)}
         className="w-full border-b border-[var(--color-border)] bg-transparent pb-1 text-sm outline-none focus:border-[var(--color-primary)]"
       />
+      {historyOpen && (
+        <div className="mt-1 rounded-md bg-[var(--color-surface-muted)] p-2 text-xs">
+          {fieldAudits.length === 0 ? (
+            <span className="text-[var(--color-ink-secondary)]">No field changes recorded.</span>
+          ) : (
+            fieldAudits.slice(0, 4).map((audit) => (
+              <div key={audit.id} className="border-b border-[var(--color-border)] py-1 last:border-0">
+                {audit.previousValue || "-"} → {audit.newValue || "-"} · {new Date(audit.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+              </div>
+            ))
+          )}
+        </div>
+      )}
     </label>
   );
 }
@@ -504,6 +556,78 @@ function splitCommaList(value: string) {
     .filter(Boolean);
 }
 
+function VitalsTab({ encounterId, sets }: { encounterId: string; sets: ReturnType<typeof useVitalsSets> }) {
+  return (
+    <div className="space-y-3">
+      <VitalsCaptureForm encounterId={encounterId} source="full" />
+      <VitalsFlowsheet sets={sets} />
+    </div>
+  );
+}
+
+function TriageTab({
+  encounterId,
+  currentLevel,
+  latest,
+}: {
+  encounterId: string;
+  currentLevel: EsiLevel | string | number | null;
+  latest: ReturnType<typeof latestVitals>;
+}) {
+  const mode = useAppStore((s) => s.mode);
+  const view = useEncounterView(encounterId);
+  const levels: EsiLevel[] = [1, 2, 3, 4, 5];
+  return (
+    <div className="space-y-3">
+      <VitalsCaptureForm encounterId={encounterId} source="triage" />
+      <section className="card">
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-semibold">Encounter pathway</h2>
+            <p className="text-xs text-[var(--color-ink-secondary)]">Pathway changes preserve transition history.</p>
+          </div>
+          <span className="rounded-full bg-[var(--color-surface-muted)] px-2 py-1 text-xs font-bold uppercase text-[var(--color-ink-secondary)]">
+            {(view?.encounter.pathway ?? "standard").replace(/_/g, " ")}
+          </span>
+        </div>
+        <div className="grid grid-cols-3 gap-2 max-[720px]:grid-cols-1">
+          <button type="button" onClick={() => void setEncounterPathway(encounterId, "fast_track", mode, "Low-risk patient assigned to fast-track", "Triage nurse")} className="rounded-md border border-[var(--color-border)] px-3 py-2 text-left text-sm hover:bg-[var(--color-primary-tint)]">
+            <strong>Fast-track</strong>
+            <span className="block text-xs text-[var(--color-ink-secondary)]">Stable minor case</span>
+          </button>
+          <button type="button" onClick={() => void setEncounterPathway(encounterId, "standard", mode, "Moved to main ER pathway", "Triage nurse")} className="rounded-md border border-[var(--color-border)] px-3 py-2 text-left text-sm hover:bg-[var(--color-primary-tint)]">
+            <strong>Main ER</strong>
+            <span className="block text-xs text-[var(--color-ink-secondary)]">Standard treatment queue</span>
+          </button>
+          <button type="button" onClick={() => void setEncounterPathway(encounterId, "critical", mode, "Deterioration: move to resuscitation", "Triage nurse")} className="rounded-md border border-[var(--color-red-solid)] px-3 py-2 text-left text-sm text-[var(--color-red-text)] hover:bg-[var(--color-red-tint)]">
+            <strong>Resuscitation</strong>
+            <span className="block text-xs">Immediate critical-care pathway</span>
+          </button>
+        </div>
+      </section>
+      <section className="card space-y-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 className="mr-auto text-sm font-semibold">ESI triage</h2>
+          <TriageVitalsAdvisory latest={latest} />
+        </div>
+        <div className="grid grid-cols-5 gap-2 max-[720px]:grid-cols-2">
+          {levels.map((level) => (
+            <button
+              key={level}
+              onClick={() => void setTriage(encounterId, "esi", level, mode)}
+              className={`rounded-md border px-3 py-3 text-left ${currentLevel === level ? "border-[var(--color-primary)] bg-[var(--color-primary-tint)] text-[var(--color-primary)]" : "border-[var(--color-border)] bg-[var(--color-surface)]"}`}
+            >
+              <div className="text-lg font-bold">ESI {level}</div>
+              <div className="text-xs text-[var(--color-ink-secondary)]">{ESI_DESCRIPTIONS[level]}</div>
+            </button>
+          ))}
+        </div>
+      </section>
+      <TriageHistory encounterId={encounterId} />
+    </div>
+  );
+}
+
 function NotesTab({ encounterId }: { encounterId: string }) {
   const events = useClinicalEvents(encounterId);
   const notes = events.filter((e) => e.type === "note" || e.type === "voice_note");
@@ -549,11 +673,13 @@ function NotesTab({ encounterId }: { encounterId: string }) {
 function HistoryTab({ patientId, encounterId }: { patientId: string; encounterId: string }) {
   const patientAudits = useAuditEvents(patientId);
   const encounterAudits = useAuditEvents(encounterId);
+  const transitions = useStateTransitions(encounterId);
   const combined = [...patientAudits, ...encounterAudits].sort((a, b) => b.timestamp - a.timestamp);
 
   return (
+    <div className="grid grid-cols-[1fr_0.85fr] gap-3 max-[920px]:grid-cols-1">
     <div className="card">
-      <h2 className="text-sm font-medium mb-3">History</h2>
+      <h2 className="mb-3 text-sm font-medium">Audit history</h2>
       {combined.length === 0 ? (
         <div className="text-sm text-[var(--color-ink-secondary)]">No history recorded yet.</div>
       ) : (
@@ -578,6 +704,100 @@ function HistoryTab({ patientId, encounterId }: { patientId: string; encounterId
           ))}
         </div>
       )}
+    </div>
+    <div className="card">
+      <h2 className="mb-3 text-sm font-medium">State transitions</h2>
+      {transitions.length === 0 ? (
+        <div className="text-sm text-[var(--color-ink-secondary)]">No transitions recorded yet.</div>
+      ) : (
+        <div className="space-y-2">
+          {transitions.map((transition) => (
+            <div key={transition.id} className="border-b border-[var(--color-border)] pb-2 text-sm last:border-0 last:pb-0">
+              <div className="font-semibold">
+                {transition.previousState ?? "created"} → {transition.newState}
+              </div>
+              <div className="text-xs text-[var(--color-ink-secondary)]">
+                {transition.reason ?? "No reason"} · {transition.actor ?? "Unknown actor"} · {new Date(transition.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+    </div>
+  );
+}
+
+function MergeModal({ survivor, onClose }: { survivor: Patient; onClose: () => void }) {
+  const patients = useAllPatients();
+  const mode = useAppStore((s) => s.mode);
+  const [query, setQuery] = useState("");
+  const [source, setSource] = useState<Patient | null>(null);
+  const [choices, setChoices] = useState<Record<string, "survivor" | "source">>({});
+  const matches = fuzzyPatientMatches(patients.filter((patient) => patient.id !== survivor.id), { text: query, phone: query, nationalId: query });
+  const fields: (keyof Patient)[] = ["name", "dateOfBirth", "sex", "phone", "nationalId", "address", "preferredLanguage"];
+
+  async function confirm() {
+    if (!source) return;
+    const selected: Partial<Patient> = {};
+    for (const field of fields) {
+      if (choices[String(field)] === "source") {
+        (selected as Record<string, unknown>)[field] = source[field];
+      }
+    }
+    await mergePatientRecords(survivor.id, source.id, selected, mode);
+    onClose();
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3" onClick={onClose}>
+      <div className="w-full max-w-[760px] rounded-lg bg-white p-4 shadow-xl" onClick={(event) => event.stopPropagation()}>
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <div>
+            <p className="text-xs font-bold uppercase text-[var(--color-primary)]">Merge records</p>
+            <h2 className="text-base font-semibold">Survivor: {survivor.name ?? survivor.mrn}</h2>
+          </div>
+          <button onClick={onClose} className="rounded-md border border-[var(--color-border)] px-2 py-1 text-sm">Close</button>
+        </div>
+        {!source ? (
+          <div className="space-y-2">
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search duplicate record" className="w-full rounded-md border border-[var(--color-border)] px-3 py-2 text-sm outline-none" />
+            {matches.map((match) => (
+              <button key={match.patient.id} onClick={() => setSource(match.patient)} className="flex w-full items-center justify-between rounded-md border border-[var(--color-border)] px-3 py-2 text-left text-sm hover:bg-[var(--color-primary-tint)]">
+                <span><strong>{match.patient.name ?? "Unknown"}</strong> | {match.patient.mrn ?? match.patient.displayNumber}</span>
+                <span className="text-xs text-[var(--color-ink-secondary)]">{match.reasons.join(", ")}</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-sm">
+                <thead>
+                  <tr className="border-b border-[var(--color-border)]">
+                    <th className="px-2 py-1 text-left">Field</th>
+                    <th className="px-2 py-1 text-left">Keep survivor</th>
+                    <th className="px-2 py-1 text-left">Use source</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {fields.map((field) => (
+                    <tr key={String(field)} className="border-b border-[var(--color-border)] last:border-0">
+                      <td className="px-2 py-1 font-semibold">{String(field)}</td>
+                      <td className="px-2 py-1"><label><input type="radio" checked={choices[String(field)] !== "source"} onChange={() => setChoices((current) => ({ ...current, [String(field)]: "survivor" }))} /> {String(survivor[field] ?? "-")}</label></td>
+                      <td className="px-2 py-1"><label><input type="radio" checked={choices[String(field)] === "source"} onChange={() => setChoices((current) => ({ ...current, [String(field)]: "source" }))} /> {String(source[field] ?? "-")}</label></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setSource(null)} className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm">Back</button>
+              <button onClick={() => void confirm()} className="rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-semibold text-white">Confirm merge</button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -8,6 +8,7 @@ import {
   seedIdentityCounters,
 } from "./ids";
 import { writeAudit } from "./audit";
+import { DEFAULT_REFERENCE_RANGES, DEFAULT_VITALS_SCHEDULES, calculateBmi, implausibleFields, scoreNews2 } from "../lib/vitals";
 import type {
   Patient,
   Encounter,
@@ -17,6 +18,9 @@ import type {
   Zone,
   ReconciliationItem,
   StartColor,
+  PatientIdentifier,
+  VitalsSet,
+  Avpu,
 } from "../types";
 
 const ZONES: Zone[] = [
@@ -101,6 +105,7 @@ async function seedInitialDataInner() {
   if (await isSeeded()) {
     await ensureMockPatientHistory();
     await ensurePerfectMockPatient();
+    await ensureClinicalFoundationSeeds();
     return;
   }
 
@@ -234,6 +239,7 @@ async function seedInitialDataInner() {
 
   await ensureMockPatientHistory();
   await ensurePerfectMockPatient();
+  await ensureClinicalFoundationSeeds();
 }
 
 async function ensureMockPatientHistory() {
@@ -572,6 +578,254 @@ async function ensurePerfectMockPatient() {
   }
 }
 
+async function ensureClinicalFoundationSeeds() {
+  await db.transaction("rw", db.referenceRanges, db.vitalsSchedules, async () => {
+    for (const range of DEFAULT_REFERENCE_RANGES) await db.referenceRanges.put(range);
+    for (const schedule of DEFAULT_VITALS_SCHEDULES) await db.vitalsSchedules.put(schedule);
+  });
+
+  const patients = await db.patients.toArray();
+  const normalPatients = patients.filter((patient) => !patient.displayNumber.startsWith("#B-"));
+  for (const patient of normalPatients) {
+    const updates: Partial<Patient> = {};
+    if (patient.registrationComplete === undefined) updates.registrationComplete = Boolean(patient.name && patient.phone);
+    if (!patient.catastropheTags) updates.catastropheTags = [];
+    if (patient.mergedIntoPatientId === undefined) updates.mergedIntoPatientId = null;
+    if (patient.mergedAt === undefined) updates.mergedAt = null;
+    if (patient.mergeUndoneAt === undefined) updates.mergeUndoneAt = null;
+    if (Object.keys(updates).length) await db.patients.update(patient.id, updates);
+    if (patient.mrn) await ensureIdentifier(patient.id, "mrn", patient.mrn, patient.createdAt);
+    if (patient.nationalId) await ensureIdentifier(patient.id, "national_id", patient.nationalId, patient.createdAt);
+  }
+
+  const demos = [
+    patientSeed("clinical-karim-salem", "Karim Salem", "1986-03-12", "male", "+961 70 410 111", "1986-0312-4421", "Beirut", "Chest tightness"),
+    patientSeed("clinical-karem-salim", "Karem Salim", "1986-09-02", "male", "+961 71 410 111", null, "Beirut", "Palpitations"),
+    patientSeed("clinical-nadine-haddad", "Nadine Haddad", "1994-11-22", "female", "+961 76 222 501", "1994-1122-8041", "Mount Lebanon", "Shortness of breath"),
+    patientSeed("clinical-george-matta", "George Matta", "1959-01-08", "male", "+961 03 889 120", "1959-0108-1188", "North", "Fever and cough"),
+    patientSeed("clinical-sara-daou", "Sara Daou", "1978-05-17", "female", "+961 81 440 908", "1978-0517-9002", "Beqaa", "Abdominal pain"),
+    patientSeed("clinical-omar-rahhal", "Omar Rahhal", "2001-08-29", "male", "+961 70 884 219", "2001-0829-6442", "South", "Ankle injury"),
+    patientSeed("clinical-joyce-aoun", "Joyce Aoun", "1967-07-03", "female", "+961 79 113 556", "1967-0703-1775", "Nabatieh", "Dizziness"),
+    patientSeed("clinical-hassan-zein", "Hassan Zein", "1981-02-19", "male", "+961 76 909 233", "1981-0219-5530", "Akkar", "Back pain"),
+    patientSeed("clinical-rana-khoury", "Rana Khoury", "1990-06-14", "female", "+961 03 155 550", "1990-0614-7701", "Baalbek-Hermel", "Migraine"),
+    patientSeed("clinical-elie-sarkis", "Elie Sarkis", "1972-12-27", "male", "+961 71 762 302", "1972-1227-3334", "Keserwan-Jbeil", "Laceration"),
+    patientSeed("clinical-duplicate-source", "Karim Salem", "1986-03-12", "male", "+961 70 410 112", null, "Beirut", "Duplicate record demo"),
+  ];
+
+  for (const seed of demos) await ensureSeedPatient(seed);
+
+  await ensureQuickSeed("clinical-quick-unknown", "Unknown male ~30", "male", "18-30", "Blast debris eye irritation");
+  await ensureQuickSeed("clinical-quick-layal", "Layal K.", "female", "31-50", "Fever after travel");
+
+  const activeEncounters = await db.encounters.toArray();
+  for (const encounter of activeEncounters) {
+    const existing = await db.vitalsSets.where("encounterId").equals(encounter.id).count();
+    if (existing > 0) continue;
+    const triage = (await db.triageAssessments.where("encounterId").equals(encounter.id).sortBy("performedAt")).at(-1)?.level;
+    const base = typeof triage === "number" && triage <= 2
+      ? { rr: 22, spo2: 94, hr: 104, sbp: 112, temp: 37.6 }
+      : { rr: 16, spo2: 98, hr: 78, sbp: 122, temp: 36.9 };
+    await addSeedVitals(encounter.id, encounter.patientId, encounter.arrivedAt + 6 * 60 * 1000, base);
+  }
+
+  const deteriorating = await db.encounters.where("patientId").equals("clinical-nadine-haddad").first();
+  if (deteriorating) {
+    await db.vitalsSets.where("encounterId").equals(deteriorating.id).delete();
+    await addSeedVitals(deteriorating.id, deteriorating.patientId, Date.now() - 80 * 60 * 1000, { rr: 20, spo2: 96, hr: 92, sbp: 116, temp: 37.8 });
+    await addSeedVitals(deteriorating.id, deteriorating.patientId, Date.now() - 42 * 60 * 1000, { rr: 24, spo2: 93, hr: 108, sbp: 104, temp: 38.5 });
+    await addSeedVitals(deteriorating.id, deteriorating.patientId, Date.now() - 8 * 60 * 1000, { rr: 28, spo2: 91, hr: 122, sbp: 96, temp: 39.2, o2: true });
+  }
+}
+
+function patientSeed(
+  id: string,
+  name: string,
+  dob: string,
+  sex: Patient["sex"],
+  phone: string,
+  nationalId: string | null,
+  city: string,
+  complaint: string,
+) {
+  return { id, name, dob, sex, phone, nationalId, city, complaint };
+}
+
+async function ensureSeedPatient(seed: ReturnType<typeof patientSeed>) {
+  if (await db.patients.get(seed.id)) return;
+  const now = Date.now() - randInt(20, 180) * 60 * 1000;
+  const mrn = nextMrn();
+  const patient: Patient = {
+    id: seed.id,
+    displayNumber: nextDisplayNumber("normal"),
+    mrn,
+    name: seed.name,
+    dateOfBirth: seed.dob,
+    sex: seed.sex,
+    phone: seed.phone,
+    nationalId: seed.nationalId,
+    email: `${seed.name.toLowerCase().replace(/\s+/g, ".")}@example.test`,
+    address: "Demo street, building 4",
+    city: seed.city,
+    nationality: "Lebanese",
+    preferredLanguage: rand(["Arabic", "English", "French"]),
+    emergencyContact: "Family contact | Relative | +961 70 100 200",
+    emergencyContactName: "Family contact",
+    emergencyContactRelationship: "Relative",
+    emergencyContactPhone: "+961 70 100 200",
+    knownConditions: rand([["Hypertension"], ["Asthma"], ["None known"]]),
+    currentMedications: rand([["Amlodipine"], ["Salbutamol inhaler"], []]),
+    photoBlob: null,
+    identityStatus: "confirmed",
+    estimatedAgeRange: null,
+    registrationComplete: true,
+    duplicateOverride: false,
+    catastropheTags: seed.id === "clinical-karim-salem" ? ["#B-2999"] : [],
+    mergedIntoPatientId: null,
+    mergedAt: null,
+    mergeUndoneAt: null,
+    createdAt: now,
+  };
+  const encounter: Encounter = {
+    id: `${seed.id}-encounter`,
+    caseNumber: nextCaseNumber(),
+    patientId: seed.id,
+    incidentId: null,
+    modeAtCreation: "normal",
+    arrivedAt: now,
+    state: "triaged",
+    disposition: null,
+    closedAt: null,
+    chiefComplaint: seed.complaint,
+    arrivalMethod: "walk_in",
+    referralSource: null,
+    allergies: [],
+    currentLocationName: null,
+    currentZone: null,
+    currentProvider: null,
+  };
+  await db.patients.add(patient);
+  await ensureIdentifier(patient.id, "mrn", mrn, now);
+  if (seed.nationalId) await ensureIdentifier(patient.id, "national_id", seed.nationalId, now);
+  for (const tag of patient.catastropheTags ?? []) await ensureIdentifier(patient.id, "catastrophe_tag", tag, now);
+  await db.encounters.add(encounter);
+  await db.triageAssessments.add({ id: uuid(), encounterId: encounter.id, algorithm: "esi", level: seed.id === "clinical-nadine-haddad" ? 2 : 3, performedAt: now + 3 * 60 * 1000, note: null });
+  await db.clinicalEvents.add({ id: uuid(), encounterId: encounter.id, type: "created", content: { caseNumber: encounter.caseNumber, mrn }, attachmentBlob: null, recordedAt: now });
+}
+
+async function ensureQuickSeed(id: string, name: string, sex: Patient["sex"], band: string, complaint: string) {
+  if (await db.patients.get(id)) return;
+  const now = Date.now() - randInt(10, 90) * 60 * 1000;
+  const mrn = nextMrn();
+  const encounterId = `${id}-encounter`;
+  await db.patients.add({
+    id,
+    displayNumber: nextDisplayNumber("normal"),
+    mrn,
+    name,
+    dateOfBirth: null,
+    sex,
+    phone: null,
+    photoBlob: null,
+    identityStatus: "provisional",
+    estimatedAgeRange: band,
+    registrationComplete: false,
+    duplicateOverride: false,
+    catastropheTags: [],
+    mergedIntoPatientId: null,
+    mergedAt: null,
+    mergeUndoneAt: null,
+    createdAt: now,
+  });
+  await ensureIdentifier(id, "mrn", mrn, now);
+  await db.encounters.add({
+    id: encounterId,
+    caseNumber: nextCaseNumber(),
+    patientId: id,
+    incidentId: null,
+    modeAtCreation: "normal",
+    arrivedAt: now,
+    state: "registered",
+    disposition: null,
+    closedAt: null,
+    chiefComplaint: complaint,
+    arrivalMethod: "walk_in",
+    referralSource: null,
+    allergies: [],
+    currentLocationName: null,
+    currentZone: null,
+    currentProvider: null,
+  });
+  await db.clinicalEvents.add({ id: uuid(), encounterId, type: "created", content: { registrationDepth: "quick", mrn }, attachmentBlob: null, recordedAt: now });
+}
+
+async function ensureIdentifier(patientId: string, type: PatientIdentifier["type"], value: string, createdAt: number) {
+  const existing = await db.patientIdentifiers
+    .where("value")
+    .equals(value)
+    .filter((identifier) => identifier.patientId === patientId && identifier.type === type)
+    .first();
+  if (!existing) await db.patientIdentifiers.add({ id: uuid(), patientId, type, value, createdAt });
+}
+
+async function addSeedVitals(
+  encounterId: string,
+  patientId: string,
+  recordedAt: number,
+  values: { rr: number; spo2: number; hr: number; sbp: number; temp: number; dbp?: number; o2?: boolean; avpu?: Avpu },
+) {
+  const existing = await db.vitalsSets
+    .where("encounterId")
+    .equals(encounterId)
+    .filter((set) => set.recordedAt === recordedAt)
+    .first();
+  if (existing) return;
+  const news = scoreNews2({
+    respiratoryRate: values.rr,
+    spo2: values.spo2,
+    supplementalO2: Boolean(values.o2),
+    temperature: values.temp,
+    systolicBp: values.sbp,
+    heartRate: values.hr,
+    consciousness: values.avpu ?? "Alert",
+  });
+  const vitals: VitalsSet = {
+    id: uuid(),
+    encounterId,
+    patientId,
+    recordedAt,
+    temperature: values.temp,
+    heartRate: values.hr,
+    respiratoryRate: values.rr,
+    systolicBp: values.sbp,
+    diastolicBp: values.dbp ?? Math.max(40, values.sbp - randInt(35, 55)),
+    spo2: values.spo2,
+    supplementalO2: Boolean(values.o2),
+    consciousness: values.avpu ?? "Alert",
+    painScore: randInt(0, 7),
+    bloodGlucose: randInt(82, 160),
+    weightKg: 72,
+    heightCm: 172,
+    bmi: calculateBmi(72, 172),
+    gcsEye: 4,
+    gcsVerbal: 5,
+    gcsMotor: 6,
+    gcsTotal: 15,
+    news2: news.score,
+    news2Breakdown: news.breakdown,
+    implausibleFields: implausibleFields({ respiratoryRate: values.rr, spo2: values.spo2, heartRate: values.hr, systolicBp: values.sbp, temperature: values.temp }),
+    source: "full",
+  };
+  await db.vitalsSets.add(vitals);
+  await db.clinicalEvents.add({
+    id: uuid(),
+    encounterId,
+    type: "vitals",
+    content: { vitalsSetId: vitals.id, bp: `${vitals.systolicBp}/${vitals.diastolicBp}`, hr: values.hr, rr: values.rr, spo2: values.spo2, temp: values.temp, news2: news.score },
+    attachmentBlob: null,
+    recordedAt,
+  });
+}
+
 export async function seedDemoIncident() {
   const now = Date.now();
   const incidentId = uuid();
@@ -600,6 +854,7 @@ export async function seedDemoIncident() {
   const encounters: Encounter[] = [];
   const triages: TriageAssessment[] = [];
   const events: ClinicalEvent[] = [];
+  const vitalsSets: VitalsSet[] = [];
   const reconItems: ReconciliationItem[] = [];
 
   let maxCounter = 2800;
@@ -664,6 +919,59 @@ export async function seedDemoIncident() {
       recordedAt: arrivedAt,
     });
 
+    if (i < 8 && color !== "black") {
+      const sample = color === "red"
+        ? { rr: 30, spo2: 90, hr: 128, sbp: 92, avpu: "Voice" as Avpu }
+        : color === "yellow"
+          ? { rr: 24, spo2: 94, hr: 108, sbp: 106, avpu: "Alert" as Avpu }
+          : { rr: 18, spo2: 98, hr: 86, sbp: 124, avpu: "Alert" as Avpu };
+      const news = scoreNews2({
+        respiratoryRate: sample.rr,
+        spo2: sample.spo2,
+        supplementalO2: color === "red",
+        temperature: null,
+        systolicBp: sample.sbp,
+        heartRate: sample.hr,
+        consciousness: sample.avpu,
+      });
+      const vitalsId = uuid();
+      vitalsSets.push({
+        id: vitalsId,
+        encounterId,
+        patientId,
+        recordedAt: arrivedAt + 2 * 60 * 1000,
+        temperature: null,
+        heartRate: sample.hr,
+        respiratoryRate: sample.rr,
+        systolicBp: sample.sbp,
+        diastolicBp: null,
+        spo2: sample.spo2,
+        supplementalO2: color === "red",
+        consciousness: sample.avpu,
+        painScore: null,
+        bloodGlucose: null,
+        weightKg: null,
+        heightCm: null,
+        bmi: null,
+        gcsEye: null,
+        gcsVerbal: null,
+        gcsMotor: null,
+        gcsTotal: null,
+        news2: news.score,
+        news2Breakdown: news.breakdown,
+        implausibleFields: [],
+        source: "crisis",
+      });
+      events.push({
+        id: uuid(),
+        encounterId,
+        type: "vitals",
+        content: { vitalsSetId: vitalsId, hr: sample.hr, rr: sample.rr, spo2: sample.spo2, bp: sample.sbp, avpu: sample.avpu, news2: news.score, source: "crisis" },
+        attachmentBlob: null,
+        recordedAt: arrivedAt + 2 * 60 * 1000,
+      });
+    }
+
     const hasVoice = Math.random() > 0.75;
     const hasPhoto = Math.random() > 0.75;
     if (hasVoice) {
@@ -702,6 +1010,7 @@ export async function seedDemoIncident() {
   await db.encounters.bulkAdd(encounters);
   await db.triageAssessments.bulkAdd(triages);
   await db.clinicalEvents.bulkAdd(events);
+  if (vitalsSets.length) await db.vitalsSets.bulkAdd(vitalsSets);
 
   const issueTypes: ReconciliationItem["issueType"][] = [
     "unknown_identity",
@@ -709,6 +1018,7 @@ export async function seedDemoIncident() {
     "voice_unreviewed",
     "location_missing",
     "possible_duplicate",
+    "registration_completion",
     "unknown_identity",
   ];
 

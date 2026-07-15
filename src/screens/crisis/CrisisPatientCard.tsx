@@ -10,16 +10,18 @@ import {
   MoreVertical,
   HeartPulse,
 } from "lucide-react";
-import { useEncounterView, useClinicalEvents } from "../../db/hooks";
+import { useEncounterView, useClinicalEvents, useVitalsSets } from "../../db/hooks";
 import { addClinicalEvent, assignLocation, setDisposition, assignTeam, setTriage, recordTreatment } from "../../db/repo";
 import { useAppStore } from "../../store/useAppStore";
 import { WristbandPreview } from "../../components/WristbandPreview";
 import { VoiceRecorderModal } from "../../components/VoiceRecorderModal";
 import { PhotoCaptureModal } from "../../components/PhotoCaptureModal";
 import { isStartColor, triagePalette } from "../../lib/triage";
+import { CrisisNewsChip, VitalsCaptureForm } from "../../components/VitalsPanel";
+import { latestVitals } from "../../lib/vitals";
 import type { StartColor, Disposition } from "../../types";
 
-type Overlay = "none" | "voice" | "photo" | "care" | "color" | "location" | "disposition" | "team" | "reprint";
+type Overlay = "none" | "voice" | "photo" | "care" | "vitals" | "color" | "location" | "disposition" | "team" | "reprint";
 
 const ZONES_STATIC = ["Triage A", "Triage B", "Triage C", "Trauma Bay 1", "Trauma Bay 2", "Fast-track"];
 const PROVIDERS = ["Demo Provider", "Dr. Aoun", "Dr. Haddad", "Nurse Sarkis"];
@@ -36,6 +38,7 @@ export function CrisisPatientCard() {
   const navigate = useNavigate();
   const view = useEncounterView(encounterId);
   const events = useClinicalEvents(encounterId);
+  const vitalsSets = useVitalsSets(encounterId);
   const mode = useAppStore((s) => s.mode);
   const incidentCode = useAppStore((s) => s.incidentCode);
   const pushToast = useAppStore((s) => s.pushToast);
@@ -51,6 +54,7 @@ export function CrisisPatientCard() {
 
   const { patient, encounter, triage } = view;
   const palette = triage && isStartColor(triage) ? triagePalette(triage) : null;
+  const latestStructuredVitals = latestVitals(vitalsSets);
 
   async function handleColorPick(color: StartColor) {
     if (color === "black") {
@@ -119,6 +123,9 @@ export function CrisisPatientCard() {
           <div className="text-sm text-[var(--color-ink-secondary)]">
             {patient.estimatedAgeRange ?? "Age unknown"} · {encounter.currentLocationName ?? "No location"}
           </div>
+          <div className="mt-1">
+            <CrisisNewsChip latest={latestStructuredVitals} />
+          </div>
         </div>
         <button
           onClick={() => setOverlay("photo")}
@@ -174,6 +181,7 @@ export function CrisisPatientCard() {
         <ActionButton icon={<Mic size={22} />} label="Voice" onClick={() => setOverlay("voice")} />
         <ActionButton icon={<Camera size={22} />} label="Photo" onClick={() => setOverlay("photo")} />
         <ActionButton icon={<HeartPulse size={22} />} label="Care" onClick={() => setOverlay("care")} />
+        <ActionButton icon={<HeartPulse size={22} />} label="Vitals" onClick={() => setOverlay("vitals")} />
         <ActionButton icon={<Palette size={22} />} label="Color" onClick={() => setOverlay("color")} />
         <ActionButton icon={<MapPin size={22} />} label="Location" onClick={() => setOverlay("location")} />
         <ActionButton icon={<ClipboardList size={22} />} label="Disposition" onClick={() => setOverlay("disposition")} />
@@ -217,6 +225,12 @@ export function CrisisPatientCard() {
               pushToast(`${name} recorded on this device`);
             }}
           />
+        </FullScreenSheet>
+      )}
+
+      {overlay === "vitals" && (
+        <FullScreenSheet title="Record crisis vitals" onClose={() => setOverlay("none")}>
+          <VitalsCaptureForm encounterId={encounterId} source="crisis" compact onSaved={() => setOverlay("none")} />
         </FullScreenSheet>
       )}
 

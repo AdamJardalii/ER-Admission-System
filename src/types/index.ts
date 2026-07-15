@@ -1,8 +1,10 @@
 export type Mode = "normal" | "catastrophe";
+export type EncounterPathway = "standard" | "fast_track" | "critical" | "catastrophe";
 
-export type IdentityStatus = "unknown" | "provisional" | "confirmed";
+export type IdentityStatus = "unknown" | "provisional" | "confirmed" | "pending_verification" | "merged";
 
 export type Sex = "male" | "female" | "unknown";
+export type AgeBand = "0-1" | "1-5" | "5-12" | "13-17" | "18-30" | "31-50" | "51-70" | "70+";
 
 export type ArrivalMethod = "walk_in" | "ambulance" | "transfer" | "police" | "other";
 
@@ -11,18 +13,34 @@ export type EncounterState =
   | "registered"
   | "triaged"
   | "waiting"
+  | "assigned"
+  | "in_assessment"
+  | "orders_pending"
   | "in_treatment"
+  | "reassessment_required"
   | "observation"
   | "admission_pending"
+  | "waiting_for_specialty_acceptance"
+  | "waiting_for_bed"
+  | "waiting_for_transport"
   | "transfer_pending"
   | "discharge_pending"
   | "disposition_pending"
+  | "disposition_decided"
+  | "fast_track"
+  | "resuscitation"
   | "closed"
+  | "discharged"
   | "left_without_being_seen"
+  | "left_against_medical_advice"
   | "absconded"
   | "died_before_treatment"
   | "transferred_out"
-  | "unknown_status";
+  | "transferred"
+  | "deceased"
+  | "unknown_status"
+  | "identity_pending"
+  | "reconciliation_pending";
 
 export type Disposition =
   | "admitted"
@@ -38,13 +56,27 @@ export type Disposition =
   | "absconded"
   | "unknown_status";
 
-export type OrderType = "laboratory" | "imaging" | "medication" | "procedure" | "consultation";
+export type OrderType =
+  | "laboratory"
+  | "imaging"
+  | "medication"
+  | "procedure"
+  | "consultation"
+  | "blood_product"
+  | "observation"
+  | "admission"
+  | "transfer"
+  | "monitoring"
+  | "other";
 
 export type OrderStatus =
+  | "draft"
   | "ordered"
   | "acknowledged"
   | "in_progress"
   | "completed"
+  | "result_available"
+  | "reviewed"
   | "cancelled"
   | "rejected"
   | "failed"
@@ -82,6 +114,22 @@ export interface Patient {
   photoBlob: Blob | null;
   identityStatus: IdentityStatus;
   estimatedAgeRange: string | null;
+  registrationComplete?: boolean;
+  duplicateOverride?: boolean;
+  catastropheTags?: string[];
+  mergedIntoPatientId?: string | null;
+  mergedAt?: number | null;
+  mergeUndoneAt?: number | null;
+  createdAt: number;
+}
+
+export type IdentifierType = "mrn" | "national_id" | "catastrophe_tag";
+
+export interface PatientIdentifier {
+  id: string;
+  patientId: string;
+  type: IdentifierType;
+  value: string;
   createdAt: number;
 }
 
@@ -91,6 +139,7 @@ export interface Encounter {
   patientId: string;
   incidentId: string | null;
   modeAtCreation: Mode;
+  pathway?: EncounterPathway;
   arrivedAt: number;
   state: EncounterState;
   disposition: Disposition | null;
@@ -102,6 +151,21 @@ export interface Encounter {
   currentLocationName: string | null;
   currentZone: string | null;
   currentProvider: string | null;
+  assignedNurse?: string | null;
+  careTeam?: string[];
+  updatedAt?: number | null;
+}
+
+export interface StateTransition {
+  id: string;
+  encounterId: string;
+  previousState: EncounterState | null;
+  newState: EncounterState;
+  reason: string | null;
+  actor: string | null;
+  device: string | null;
+  source: "online" | "offline" | "local";
+  timestamp: number;
 }
 
 export interface TriageAssessment {
@@ -140,6 +204,8 @@ export type ClinicalEventType =
   | "location"
   | "disposition"
   | "disposition_status"
+  | "state_transition"
+  | "correction"
   | "team";
 
 export interface ClinicalEvent {
@@ -163,6 +229,80 @@ export interface AuditEvent {
   actor?: string | null;
 }
 
+export type Avpu = "Alert" | "Voice" | "Pain" | "Unresponsive";
+
+export interface News2Breakdown {
+  respiratoryRate: number;
+  spo2: number;
+  supplementalO2: number;
+  temperature: number;
+  systolicBp: number;
+  heartRate: number;
+  consciousness: number;
+}
+
+export interface VitalsSet {
+  id: string;
+  encounterId: string;
+  patientId: string;
+  recordedAt: number;
+  temperature: number | null;
+  heartRate: number | null;
+  respiratoryRate: number | null;
+  systolicBp: number | null;
+  diastolicBp: number | null;
+  spo2: number | null;
+  supplementalO2: boolean;
+  consciousness: Avpu;
+  painScore: number | null;
+  bloodGlucose: number | null;
+  weightKg: number | null;
+  heightCm: number | null;
+  bmi: number | null;
+  gcsEye: number | null;
+  gcsVerbal: number | null;
+  gcsMotor: number | null;
+  gcsTotal: number | null;
+  news2: number;
+  news2Breakdown: News2Breakdown;
+  implausibleFields: string[];
+  source: "full" | "triage" | "crisis";
+  voidedAt?: number | null;
+  voidReason?: string | null;
+}
+
+export interface ReferenceRange {
+  id: string;
+  parameter: string;
+  label: string;
+  unit: string;
+  plausibleMin: number;
+  plausibleMax: number;
+  normalMin: number | null;
+  normalMax: number | null;
+  criticalLow: number | null;
+  criticalHigh: number | null;
+}
+
+export interface VitalsSchedule {
+  id: string;
+  context: "esi" | "start";
+  level: string;
+  intervalMinutes: number | null;
+  label: string;
+}
+
+export interface MergeRecord {
+  id: string;
+  survivorPatientId: string;
+  sourcePatientId: string;
+  mergedAt: number;
+  undoneAt: number | null;
+  selectedValues: Record<string, unknown>;
+  movedEncounterIds: string[];
+  movedIdentifierIds: string[];
+}
+
 export interface Incident {
   id: string;
   name: string;
@@ -176,7 +316,8 @@ export type ReconciliationIssueType =
   | "paper_not_linked"
   | "voice_unreviewed"
   | "location_missing"
-  | "possible_duplicate";
+  | "possible_duplicate"
+  | "registration_completion";
 
 export type ReconciliationStatus = "pending" | "resolved" | "manual_review";
 

@@ -14,6 +14,7 @@ import { BedsPage } from "./screens/normal/BedsPage";
 import { PatientsPage } from "./screens/normal/PatientsPage";
 import { PatientChart } from "./screens/normal/PatientChart";
 import { RegistrationForm } from "./screens/normal/RegistrationForm";
+import { VitalsDuePage } from "./screens/normal/VitalsDuePage";
 import { IncidentCommand } from "./screens/normal/IncidentCommand";
 import { ReportsPage } from "./screens/normal/ReportsPage";
 import { ReconciliationWorkspace } from "./screens/reconcile/ReconciliationWorkspace";
@@ -97,6 +98,7 @@ function App() {
               <Route path="/patients" element={<PatientsPage />} />
               <Route path="/patients/new" element={<RegistrationForm />} />
               <Route path="/patients/:encounterId" element={<PatientChart />} />
+              <Route path="/vitals-due" element={<VitalsDuePage />} />
               <Route path="/incident" element={<IncidentCommand />} />
               <Route path="/reconcile" element={<ReconciliationWorkspace />} />
               <Route path="/reports" element={<ReportsPage />} />

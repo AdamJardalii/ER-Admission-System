@@ -7,6 +7,7 @@ const NORMAL_TABS = [
   { to: "/queue", label: "Queue" },
   { to: "/beds", label: "Beds" },
   { to: "/patients", label: "Patients" },
+  { to: "/vitals-due", label: "Vitals due" },
   { to: "/incident", label: "Incident" },
   { to: "/reconcile", label: "Reconcile" },
   { to: "/reports", label: "Reports" },

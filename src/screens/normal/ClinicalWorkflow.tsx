@@ -10,6 +10,7 @@ import {
 import { useClinicalEvents, useEncounterView, useTriageAssessments } from "../../db/hooks";
 import {
   acknowledgeCriticalResult,
+  administerMedication,
   placeOrder,
   recordAssessment,
   recordReassessment,
@@ -131,12 +132,15 @@ export function AssessmentWorkflow({ encounterId }: { encounterId: string }) {
   );
 }
 
-const ORDER_TYPES: OrderType[] = ["laboratory", "imaging", "medication", "procedure", "consultation"];
+const ORDER_TYPES: OrderType[] = ["laboratory", "imaging", "medication", "procedure", "consultation", "blood_product", "observation", "admission", "transfer", "monitoring", "other"];
 const ORDER_STATUSES: OrderStatus[] = [
+  "draft",
   "ordered",
   "acknowledged",
   "in_progress",
   "completed",
+  "result_available",
+  "reviewed",
   "cancelled",
   "rejected",
   "failed",
@@ -247,6 +251,14 @@ export function OrdersWorkflow({ encounterId }: { encounterId: string }) {
                     <button onClick={() => void saveResult(order.id)} className="h-[34px] rounded-md bg-[var(--color-primary)] px-3 text-sm font-semibold text-white">Save result</button>
                   </div>
                 )}
+                {content.orderType === "medication" && (
+                  <MedicationAdministrationRow
+                    encounterId={encounterId}
+                    orderId={order.id}
+                    medication={content.name}
+                    actor={actorDefault(view?.encounter.currentProvider)}
+                  />
+                )}
                 {results.map((resultEvent) => <ResultRow key={resultEvent.id} event={resultEvent} encounterId={encounterId} events={events} />)}
               </article>
             );
@@ -285,6 +297,70 @@ function ResultRow({ event, encounterId, events }: { event: ClinicalEvent; encou
   );
 }
 
+function MedicationAdministrationRow({
+  encounterId,
+  orderId,
+  medication,
+  actor,
+}: {
+  encounterId: string;
+  orderId: string;
+  medication: string;
+  actor: string;
+}) {
+  const mode = useAppStore((state) => state.mode);
+  const pushToast = useAppStore((state) => state.pushToast);
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState({
+    prescribedDose: "",
+    administeredDose: "",
+    route: "PO",
+    response: "",
+    notAdministeredReason: "",
+    actor,
+  });
+
+  async function save() {
+    if (!form.administeredDose.trim() && !form.notAdministeredReason.trim()) return;
+    await administerMedication(
+      encounterId,
+      {
+        medicationOrderId: orderId,
+        medication,
+        prescribedDose: form.prescribedDose,
+        administeredDose: form.administeredDose,
+        route: form.route,
+        response: form.response,
+        notAdministeredReason: form.notAdministeredReason || null,
+        actor: form.actor || "Current nurse",
+      },
+      mode,
+    );
+    setOpen(false);
+    pushToast(form.notAdministeredReason ? "Medication non-administration documented" : "Medication administration recorded");
+  }
+
+  return (
+    <div className="mt-2 border-t border-[var(--color-border)] pt-2">
+      {!open ? (
+        <button onClick={() => setOpen(true)} className="rounded-md border border-[var(--color-border)] px-2 py-1 text-xs font-semibold">
+          Record administration
+        </button>
+      ) : (
+        <div className="grid grid-cols-[120px_120px_90px_1fr_1fr_150px_auto] items-end gap-2 max-[980px]:grid-cols-2">
+          <Field label="Ordered dose"><input className={inputClass} value={form.prescribedDose} onChange={(event) => setForm({ ...form, prescribedDose: event.target.value })} placeholder="500 mg" /></Field>
+          <Field label="Given dose"><input className={inputClass} value={form.administeredDose} onChange={(event) => setForm({ ...form, administeredDose: event.target.value })} placeholder="500 mg" /></Field>
+          <Field label="Route"><input className={inputClass} value={form.route} onChange={(event) => setForm({ ...form, route: event.target.value })} /></Field>
+          <Field label="Response"><input className={inputClass} value={form.response} onChange={(event) => setForm({ ...form, response: event.target.value })} /></Field>
+          <Field label="Not given reason"><input className={inputClass} value={form.notAdministeredReason} onChange={(event) => setForm({ ...form, notAdministeredReason: event.target.value })} placeholder="Refused, held..." /></Field>
+          <Field label="By"><input className={inputClass} value={form.actor} onChange={(event) => setForm({ ...form, actor: event.target.value })} /></Field>
+          <button onClick={() => void save()} className="h-[34px] rounded-md bg-[var(--color-primary)] px-3 text-sm font-semibold text-white">Save</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function CareWorkflow({ encounterId }: { encounterId: string }) {
   const view = useEncounterView(encounterId);
   const events = useClinicalEvents(encounterId);
@@ -293,7 +369,7 @@ export function CareWorkflow({ encounterId }: { encounterId: string }) {
   const defaultActor = actorDefault(view?.encounter.currentProvider);
   const [treatment, setTreatment] = useState({ name: "", details: "", actor: defaultActor });
   const [reassessment, setReassessment] = useState<{ response: "improved" | "unchanged" | "worse"; painScore: string; notes: string; actor: string }>({ response: "unchanged", painScore: "", notes: "", actor: defaultActor });
-  const careEvents = events.filter((event) => event.type === "treatment" || event.type === "reassessment");
+  const careEvents = events.filter((event) => event.type === "treatment" || event.type === "reassessment" || event.type === "medication");
 
   async function saveTreatment() {
     if (!treatment.name.trim()) return;
@@ -333,8 +409,8 @@ export function CareWorkflow({ encounterId }: { encounterId: string }) {
       <div className="col-span-2 max-[900px]:col-span-1">
         <TimelinePanel title="Care timeline" empty="No treatment or reassessment recorded yet.">
           {careEvents.map((event) => {
-            const content = eventContent<{ name?: string; details?: string; response?: string; painScore?: number | null; notes?: string; actor?: string }>(event);
-            return <article key={event.id} className="grid grid-cols-[110px_1fr_auto] gap-2 border-b border-[var(--color-border)] pb-2 text-sm last:border-0 last:pb-0"><strong className="capitalize text-[var(--color-primary)]">{event.type}</strong><div><div className="font-semibold capitalize">{content.name ?? content.response}</div><div className="text-xs text-[var(--color-ink-secondary)]">{content.details ?? content.notes}{content.painScore !== null && content.painScore !== undefined ? ` | Pain ${content.painScore}/10` : ""} | {content.actor}</div></div><EventTime value={event.recordedAt} /></article>;
+            const content = eventContent<{ name?: string; medication?: string; administeredDose?: string; notAdministeredReason?: string | null; details?: string; response?: string; painScore?: number | null; notes?: string; actor?: string }>(event);
+            return <article key={event.id} className="grid grid-cols-[110px_1fr_auto] gap-2 border-b border-[var(--color-border)] pb-2 text-sm last:border-0 last:pb-0"><strong className="capitalize text-[var(--color-primary)]">{event.type}</strong><div><div className="font-semibold capitalize">{content.name ?? content.medication ?? content.response}</div><div className="text-xs text-[var(--color-ink-secondary)]">{content.notAdministeredReason ? `Not given: ${content.notAdministeredReason}` : content.administeredDose ? `Given ${content.administeredDose}` : content.details ?? content.notes}{content.painScore !== null && content.painScore !== undefined ? ` | Pain ${content.painScore}/10` : ""} | {content.actor}</div></div><EventTime value={event.recordedAt} /></article>;
           })}
         </TimelinePanel>
       </div>
