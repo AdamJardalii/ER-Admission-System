@@ -1,5 +1,6 @@
 import { Link, useNavigate } from "react-router-dom";
 import { TriageBadge } from "./TriageBadge";
+import { PatientQuickActions } from "./PatientQuickActions";
 import { formatWait, isOverdue } from "../lib/triage";
 import { useAllVitalsSets } from "../db/hooks";
 import { latestVitals } from "../lib/vitals";
@@ -57,6 +58,7 @@ export function QueueTable({ rows, compact = false, stickyHeader = false }: { ro
           <th className={`${cellSpacing} w-[108px]`}>Wait</th>
           <th className={`${cellSpacing} w-[150px] max-[620px]:hidden`}>Location</th>
           <th className={`${cellSpacing} w-[170px] max-[520px]:hidden`}>Status</th>
+          <th className={`${cellSpacing} w-[52px] text-right`}>Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -105,6 +107,9 @@ export function QueueTable({ rows, compact = false, stickyHeader = false }: { ro
               </td>
               <td className={`${cellSpacing} max-[620px]:hidden`}><span className="block truncate" title={row.encounter.currentLocationName ?? "Unassigned"}>{row.encounter.currentLocationName ?? "Unassigned"}</span></td>
               <td className={`${cellSpacing} max-[520px]:hidden`}><span className="block truncate" title={STATE_LABEL[row.encounter.state] ?? row.encounter.state}>{STATE_LABEL[row.encounter.state] ?? row.encounter.state}</span></td>
+              <td className={`${cellSpacing} text-right`} onClick={(event) => event.stopPropagation()}>
+                <PatientQuickActions view={row} compact onAssignBed={() => navigate(`/beds?encounter=${row.encounter.id}`)} />
+              </td>
             </tr>
           );
         })}

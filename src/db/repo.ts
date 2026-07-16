@@ -1092,6 +1092,44 @@ export async function assignLocation(
   }
 }
 
+export async function clearEncounterLocation(
+  encounterId: string,
+  mode: Mode,
+  reason = "Bed vacated",
+) {
+  const now = Date.now();
+  const open = await db.locationAssignments
+    .where("encounterId")
+    .equals(encounterId)
+    .filter((assignment) => assignment.releasedAt === null)
+    .toArray();
+  for (const assignment of open) {
+    await db.locationAssignments.update(assignment.id, { releasedAt: now });
+  }
+  const prev = (await db.encounters.get(encounterId))?.currentLocationName ?? null;
+  await db.encounters.update(encounterId, {
+    currentLocationName: null,
+    currentZone: null,
+  });
+  await db.clinicalEvents.add({
+    id: uuid(),
+    encounterId,
+    type: "location",
+    content: { locationName: null, zone: null, reason },
+    attachmentBlob: null,
+    recordedAt: now,
+  });
+  await writeAudit({
+    entityType: "encounter",
+    entityId: encounterId,
+    action: "location_cleared",
+    previousValue: prev,
+    newValue: null,
+    reason,
+    mode,
+  });
+}
+
 export async function setEncounterPathway(
   encounterId: string,
   pathway: NonNullable<Encounter["pathway"]>,
