@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { Activity, ChevronDown, HeartPulse, Save } from "lucide-react";
 import { deleteVitalsSet, recordVitalsSet, type VitalsInput } from "../db/repo";
 import { useAppStore } from "../store/useAppStore";
@@ -15,7 +15,7 @@ import {
 } from "../lib/vitals";
 import type { Avpu, TriageLevel, VitalsSet } from "../types";
 
-const inputClass = "w-full rounded-md border border-[var(--color-border)] px-2 py-1.5 text-sm outline-none";
+const inputClass = "min-h-10 w-full rounded-md border border-[var(--color-border)] px-2.5 py-1.5 text-sm outline-none";
 
 const FULL_FIELDS: FieldSpec[] = [
   { key: "temperature", label: "Temp", unit: "C", placeholder: "36-37.9", step: "0.1" },
@@ -51,13 +51,21 @@ export function VitalsCaptureForm({
   encounterId,
   source = "full",
   compact = false,
+  embedded = false,
+  formId,
+  showSaveButton = true,
   onSaved,
 }: {
   encounterId: string;
   source?: VitalsInput["source"];
   compact?: boolean;
+  embedded?: boolean;
+  formId?: string;
+  showSaveButton?: boolean;
   onSaved?: (vitals: VitalsSet) => void;
 }) {
+  const generatedFormId = useId();
+  const resolvedFormId = formId ?? generatedFormId;
   const mode = useAppStore((s) => s.mode);
   const pushToast = useAppStore((s) => s.pushToast);
   const [values, setValues] = useState<Record<NumericKey, string>>({
@@ -82,6 +90,8 @@ export function VitalsCaptureForm({
   const fields = compact ? CRISIS_FIELDS : FULL_FIELDS;
   const parsed = parseValues(values);
   const bmi = parsed.weightKg && parsed.heightCm ? (parsed.weightKg / ((parsed.heightCm / 100) ** 2)).toFixed(1) : "-";
+  const gcsParts = [parsed.gcsEye, parsed.gcsVerbal, parsed.gcsMotor];
+  const gcsTotal = gcsParts.every((part) => part !== null) ? gcsParts.reduce<number>((total, part) => total + (part ?? 0), 0) : null;
 
   function setField(key: NumericKey, value: string) {
     setValues((current) => ({ ...current, [key]: value }));
@@ -111,35 +121,46 @@ export function VitalsCaptureForm({
   }
 
   return (
-    <section className={compact ? "space-y-3" : "card space-y-3"}>
-      {!compact && (
+    <form
+      id={resolvedFormId}
+      onSubmit={(event) => {
+        event.preventDefault();
+        void save();
+      }}
+      className={compact ? "space-y-3" : embedded ? "space-y-2" : "card space-y-3"}
+    >
+      {!compact && !embedded && (
         <div className="flex items-center gap-2">
           <HeartPulse size={17} className="text-[var(--color-primary)]" />
           <h2 className="text-sm font-semibold">Record vitals</h2>
         </div>
       )}
-      <div className={compact ? "grid grid-cols-2 gap-3" : "grid grid-cols-[repeat(auto-fit,minmax(120px,1fr))] gap-2"}>
+      <div className={compact ? "grid grid-cols-2 gap-3" : "vitals-entry-grid"}>
         {fields.map((field) => {
           const value = parseNumber(values[field.key]);
           const severity = severityFor(String(field.key), value);
+          const warningId = `${resolvedFormId}-${String(field.key)}-warning`;
+          const showWarning = touchedImplausible.includes(field.key);
           return (
             <label key={String(field.key)} className="block">
-              <span className="mb-1 flex items-center justify-between text-xs font-bold uppercase text-[var(--color-ink-secondary)]">
-                {field.label}
-                <span className="font-semibold normal-case">{field.unit}</span>
+              <span className="mb-1 block text-xs font-bold uppercase text-[var(--color-ink-secondary)]">{field.label}</span>
+              <span className="relative block">
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  step={field.step ?? "1"}
+                  value={values[field.key]}
+                  onChange={(event) => setField(field.key, event.target.value)}
+                  onBlur={() => checkPlausibility(field.key)}
+                  placeholder={field.placeholder}
+                  aria-invalid={showWarning}
+                  aria-describedby={showWarning ? warningId : undefined}
+                  className={`${inputClass} pr-14 tabular-nums ${severityClass(severity)} ${compact ? "min-h-14 text-xl font-semibold" : ""}`}
+                />
+                <span className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-xs font-semibold text-[var(--color-ink-secondary)]">{field.unit}</span>
               </span>
-              <input
-                type="number"
-                inputMode="decimal"
-                step={field.step ?? "1"}
-                value={values[field.key]}
-                onChange={(event) => setField(field.key, event.target.value)}
-                onBlur={() => checkPlausibility(field.key)}
-                placeholder={field.placeholder}
-                className={`${inputClass} ${severityClass(severity)} ${compact ? "min-h-14 text-xl font-semibold" : ""}`}
-              />
-              {touchedImplausible.includes(field.key) && (
-                <span className="mt-0.5 block text-xs font-semibold text-[var(--color-red-solid)]">check this value</span>
+              {showWarning && (
+                <span id={warningId} className="mt-0.5 block text-xs font-semibold text-[var(--color-red-solid)]">Check this value</span>
               )}
             </label>
           );
@@ -148,12 +169,12 @@ export function VitalsCaptureForm({
 
       {!compact && (
         <>
-          <div className="grid grid-cols-[1fr_170px_1fr] gap-2 max-[760px]:grid-cols-1">
-            <label className="flex items-center gap-2 rounded-md border border-[var(--color-border)] px-2.5 py-2 text-sm font-semibold">
+          <div className="flex flex-wrap items-end gap-2">
+            <label className="inline-flex min-h-10 items-center gap-2 rounded-md border border-[var(--color-border)] px-2.5 text-sm font-semibold">
               <input type="checkbox" checked={supplementalO2} onChange={(event) => setSupplementalO2(event.target.checked)} />
               Supplemental O2
             </label>
-            <label>
+            <label className="w-[150px] max-[440px]:flex-1">
               <span className="mb-1 block text-xs font-bold uppercase text-[var(--color-ink-secondary)]">AVPU</span>
               <select value={consciousness} onChange={(event) => setConsciousness(event.target.value as Avpu)} className={inputClass}>
                 <option>Alert</option>
@@ -162,16 +183,27 @@ export function VitalsCaptureForm({
                 <option>Unresponsive</option>
               </select>
             </label>
-            <div className="rounded-md bg-[var(--color-surface-muted)] px-3 py-2 text-sm">
+            <button
+              type="button"
+              aria-expanded={showGcs}
+              onClick={() => setShowGcs((value) => !value)}
+              className="inline-flex min-h-10 items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2.5 text-sm font-semibold text-[var(--color-primary)]"
+            >
+              <ChevronDown size={14} className={`transition-transform ${showGcs ? "rotate-180" : ""}`} />
+              GCS <span className="tabular-nums text-[var(--color-ink)]">{gcsTotal ?? "-"}</span>
+            </button>
+            <div className="inline-flex min-h-10 items-center rounded-md bg-[var(--color-surface-muted)] px-2.5 text-sm">
               <span className="text-xs font-bold uppercase text-[var(--color-ink-secondary)]">BMI</span>
-              <span className="ml-2 font-semibold">{bmi}</span>
+              <span className="ml-2 font-semibold tabular-nums">{bmi} {bmi !== "-" && <span className="text-xs font-medium text-[var(--color-ink-secondary)]">kg/m2</span>}</span>
             </div>
+            {showSaveButton && (
+              <button type="submit" className="ml-auto inline-flex min-h-10 items-center justify-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 text-sm font-semibold text-white">
+                <Save size={15} /> Save vitals
+              </button>
+            )}
           </div>
-          <button type="button" onClick={() => setShowGcs((value) => !value)} className="inline-flex items-center gap-1 text-xs font-semibold text-[var(--color-primary)]">
-            <ChevronDown size={14} /> GCS
-          </button>
           {showGcs && (
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-3 gap-2 max-[560px]:grid-cols-1">
               {[
                 ["gcsEye", "Eye 1-4"],
                 ["gcsVerbal", "Verbal 1-5"],
@@ -199,47 +231,119 @@ export function VitalsCaptureForm({
         </label>
       )}
 
-      <button type="button" onClick={() => void save()} className="inline-flex items-center justify-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-2 text-sm font-semibold text-white">
-        <Save size={15} /> Save vitals
-      </button>
-    </section>
+      {compact && showSaveButton && (
+        <button type="submit" className="inline-flex items-center justify-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-2 text-sm font-semibold text-white">
+          <Save size={15} /> Save vitals
+        </button>
+      )}
+    </form>
   );
 }
 
-export function VitalsHeader({ sets, triage }: { sets: VitalsSet[]; triage: TriageLevel | null }) {
+export function VitalsHeader({ sets, triage, location }: { sets: VitalsSet[]; triage: TriageLevel | null; location?: string | null }) {
   const latest = latestVitals(sets);
   const previous = previousVitals(sets);
   const stale = isVitalsOverdue(latest?.recordedAt ?? null, triage);
   const schedule = intervalForTriage(triage);
+
   if (!latest) {
-    return <div className="card text-sm text-[var(--color-ink-secondary)]">No structured vitals recorded yet.</div>;
+    return (
+      <div className="flex min-w-[220px] flex-1 flex-wrap items-center gap-2 text-sm text-[var(--color-ink-secondary)] max-[720px]:order-5 max-[720px]:min-w-0 max-[720px]:w-full">
+        {location !== undefined && <RoomChip location={location} />}
+        <span>Vitals not recorded</span>
+      </div>
+    );
   }
+
   const tiles = [
     tile("HR", latest.heartRate, previous?.heartRate, "heartRate", "bpm"),
     tile("BP", latest.systolicBp, previous?.systolicBp, "systolicBp", latest.diastolicBp ? `/${latest.diastolicBp}` : "mmHg"),
     tile("SpO2", latest.spo2, previous?.spo2, "spo2", "%"),
     tile("RR", latest.respiratoryRate, previous?.respiratoryRate, "respiratoryRate", "/min"),
     tile("Temp", latest.temperature, previous?.temperature, "temperature", "C"),
+    tile("Pain", latest.painScore, previous?.painScore ?? null, "painScore", "/10"),
     tile("NEWS2", latest.news2, previous?.news2 ?? null, "news2", ""),
   ];
+
   return (
-    <section className={`card ${stale ? "opacity-70" : ""}`}>
-      <div className="mb-2 flex flex-wrap items-center gap-2">
-        <h2 className="mr-auto text-sm font-semibold">Latest vitals</h2>
-        <span className={`rounded-full px-2 py-0.5 text-xs font-bold ${latest.news2 >= 7 ? "bg-[var(--color-red-tint)] text-[var(--color-red-text)]" : latest.news2 >= 5 ? "bg-[var(--color-yellow-tint)] text-[var(--color-yellow-text)]" : "bg-[var(--color-surface-muted)] text-[var(--color-ink-secondary)]"}`}>
-          NEWS2 {latest.news2}
+    <div
+      className={`flex min-w-[320px] flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-sm max-[720px]:order-5 max-[720px]:min-w-0 max-[720px]:w-full ${
+        stale ? "rounded-md border border-[var(--color-red-solid)] bg-[var(--color-red-tint)] px-2 py-1" : ""
+      }`}
+    >
+      {location !== undefined && <RoomChip location={location} />}
+      {tiles.map((item, index) => (
+        <span
+          key={item.label}
+          className={`inline-flex shrink-0 items-baseline gap-1 whitespace-nowrap ${index > 0 ? "border-l border-[var(--color-border)] pl-2" : ""} ${headerSeverityClass(item.severity)}`}
+          title={item.label}
+        >
+          <span className="text-xs font-bold uppercase text-[var(--color-ink-secondary)]">{item.label}</span>
+          <span className="font-semibold tabular-nums">{item.value}</span>
+          {item.unit && <span className="text-xs text-[var(--color-ink-secondary)]">{item.unit}</span>}
+          {item.arrow && <span className="text-xs font-semibold">{item.arrow === "up" ? "+" : item.arrow === "down" ? "-" : ""}</span>}
         </span>
-        <span className="text-xs text-[var(--color-ink-secondary)]">{formatAgo(latest.recordedAt)}{stale ? " | vitals due" : schedule ? ` | ${schedule.label}` : ""}</span>
+      ))}
+      <span className={`shrink-0 whitespace-nowrap text-xs ${stale ? "font-semibold text-[var(--color-red-text)]" : "text-[var(--color-ink-secondary)]"}`}>
+        {formatAgo(latest.recordedAt)}{stale ? " - vitals due" : schedule ? ` - ${schedule.label}` : ""}
+      </span>
+    </div>
+  );
+}
+
+export function CurrentVitalsSummary({ sets, recording, onRecord }: { sets: VitalsSet[]; recording: boolean; onRecord: () => void }) {
+  const current = latestVitals(sets);
+  const values = [
+    { label: "BP", value: current ? `${current.systolicBp ?? "-"}/${current.diastolicBp ?? "-"}` : "-/-", unit: "mmHg", severity: severityFor("systolicBp", current?.systolicBp ?? null) },
+    { label: "Heart rate", value: current?.heartRate ?? "-", unit: "bpm", severity: severityFor("heartRate", current?.heartRate ?? null) },
+    { label: "Respiratory rate", value: current?.respiratoryRate ?? "-", unit: "/min", severity: severityFor("respiratoryRate", current?.respiratoryRate ?? null) },
+    { label: "SpO2", value: current?.spo2 ?? "-", unit: "%", severity: severityFor("spo2", current?.spo2 ?? null) },
+    { label: "Temperature", value: current?.temperature ?? "-", unit: "C", severity: severityFor("temperature", current?.temperature ?? null) },
+    { label: "Weight", value: current?.weightKg ?? "-", unit: "kg", severity: "normal" },
+    { label: "Height", value: current?.heightCm ?? "-", unit: "cm", severity: "normal" },
+    { label: "BMI", value: current?.bmi ?? "-", unit: "kg/m2", severity: "normal" },
+    { label: "Pain", value: current?.painScore ?? "-", unit: "/10", severity: severityFor("painScore", current?.painScore ?? null) },
+  ];
+
+  return (
+    <section className="card">
+      <div className="mb-3 flex flex-wrap items-center gap-2 border-b border-[var(--color-border)] pb-2">
+        <div className="mr-auto">
+          <h2 className="text-base font-semibold">Vitals and biometrics</h2>
+          <p className="text-xs text-[var(--color-ink-secondary)]">
+            {current
+              ? `Recorded ${new Date(current.recordedAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })} · ${formatAgo(current.recordedAt)}`
+              : "No measurements recorded"}
+          </p>
+        </div>
+        <a href="#vitals-history" className="inline-flex min-h-10 items-center px-2 text-sm font-semibold text-[var(--color-primary)]">Vitals history</a>
+        <button type="button" onClick={onRecord} aria-expanded={recording} className="inline-flex min-h-10 items-center rounded-md bg-[var(--color-primary)] px-3 text-sm font-semibold text-white">
+          {recording ? "Close form" : "Record vitals"}
+        </button>
       </div>
-      <div className="grid grid-cols-6 gap-2 max-[860px]:grid-cols-3 max-[520px]:grid-cols-2">
-        {tiles.map((item) => (
-          <div key={item.label} className={`rounded-md border border-[var(--color-border)] px-2 py-1.5 ${severityClass(item.severity)}`}>
-            <div className="text-xs font-bold uppercase text-[var(--color-ink-secondary)]">{item.label}</div>
-            <div className="text-lg font-semibold">{item.value} <span className="text-xs">{item.unit}</span> <span className="text-xs">{item.arrow}</span></div>
+      <dl className="grid grid-cols-[repeat(auto-fit,minmax(118px,1fr))] gap-px overflow-hidden rounded-md border border-[var(--color-border)] bg-[var(--color-border)]">
+        {values.map((item) => (
+          <div key={item.label} className={`min-w-0 px-3 py-2 ${summarySeverityClass(item.severity)}`}>
+            <dt className="text-xs font-semibold text-[var(--color-ink-secondary)]">{item.label}</dt>
+            <dd className="mt-0.5 whitespace-nowrap text-base font-semibold tabular-nums">
+              {item.value} <span className="text-xs font-medium text-[var(--color-ink-secondary)]">{item.unit}</span>
+            </dd>
           </div>
         ))}
-      </div>
+      </dl>
     </section>
+  );
+}
+
+function RoomChip({ location }: { location: string | null }) {
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-1.5 py-0.5 text-sm font-bold ${
+        location ? "bg-[var(--color-primary-tint)] text-[var(--color-primary)]" : "bg-[var(--color-yellow-tint)] text-[var(--color-yellow-text)]"
+      }`}
+    >
+      {location ?? "Unassigned"}
+    </span>
   );
 }
 
@@ -249,17 +353,17 @@ export function News2Banner({ latest, onRetriage }: { latest: VitalsSet | null; 
   if (!text) return null;
   const red = latest.news2 >= 7;
   return (
-    <div className={`rounded-md border px-3 py-2 ${red ? "border-[var(--color-red-solid)] bg-[var(--color-red-tint)] text-[var(--color-red-text)]" : "border-[var(--color-yellow-solid)] bg-[var(--color-yellow-tint)] text-[var(--color-yellow-text)]"}`}>
+    <div className={`mt-2 rounded-md border px-3 py-2 ${red ? "border-[var(--color-red-solid)] bg-[var(--color-red-tint)] text-[var(--color-red-text)]" : "border-[var(--color-yellow-solid)] bg-[var(--color-yellow-tint)] text-[var(--color-yellow-text)]"}`}>
       <div className="flex flex-wrap items-center gap-2">
         <strong className="text-sm">Advisory</strong>
-        <span className="text-sm">{text}</span>
-        <button onClick={onRetriage} className="ml-auto rounded-md bg-white/70 px-2 py-1 text-xs font-semibold">Open re-triage</button>
+        <span className="min-w-[220px] flex-1 text-sm">{text}</span>
+        <button onClick={onRetriage} className="ml-auto min-h-9 shrink-0 rounded-md bg-[var(--color-surface)] px-3 text-sm font-semibold">Open re-triage</button>
       </div>
       <details className="mt-1 text-xs">
         <summary className="cursor-pointer font-semibold">Score breakdown</summary>
         <div className="mt-1 flex flex-wrap gap-1">
           {Object.entries(latest.news2Breakdown).map(([key, value]) => (
-            <span key={key} className="rounded bg-white/60 px-1.5 py-0.5">{key}: {value}</span>
+            <span key={key} className="rounded bg-[var(--color-surface)] px-1.5 py-0.5">{key}: {value}</span>
           ))}
         </div>
       </details>
@@ -277,35 +381,64 @@ export function VitalsFlowsheet({ sets }: { sets: VitalsSet[] }) {
     <div className="space-y-3">
       <section className="card">
         <h2 className="mb-2 text-sm font-semibold">Trends</h2>
-        <div className="grid grid-cols-3 gap-3 max-[760px]:grid-cols-1">
+        <div className="grid grid-cols-3 gap-3 max-[720px]:grid-cols-1">
           {parameters.filter(([key]) => ["heartRate", "systolicBp", "spo2", "temperature", "respiratoryRate", "news2"].includes(key)).map(([key, label]) => (
             <Sparkline key={key} label={label} values={ordered.map((set) => Number((set as unknown as Record<string, number | null>)[key] ?? 0))} />
           ))}
         </div>
       </section>
-      <section className="card overflow-x-auto">
+      <section className="card">
         <h2 className="mb-2 text-sm font-semibold">Flowsheet</h2>
-        <table className="w-full min-w-[760px] border-collapse">
-          <thead>
-            <tr>
-              <th className="px-2 py-1 text-left">Parameter</th>
-              {ordered.map((set) => <th key={set.id} className="px-2 py-1 text-right">{new Date(set.recordedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</th>)}
-            </tr>
-          </thead>
-          <tbody>
-            {parameters.map(([key, label]) => (
-              <tr key={key} className="border-t border-[var(--color-border)]">
-                <td className="px-2 py-1 font-semibold">{label}</td>
-                {ordered.map((set) => {
-                  const value = (set as unknown as Record<string, number | null>)[key];
-                  const severity = key === "news2" ? (Number(value) >= 7 ? "critical" : Number(value) >= 5 ? "abnormal" : "normal") : severityFor(key, value);
-                  return <td key={set.id} className={`px-2 py-1 text-right ${severityClass(severity)}`}>{value ?? "-"}</td>;
-                })}
+        <div className="overflow-x-auto max-[720px]:hidden">
+          <table className="w-full min-w-[760px] border-collapse">
+            <thead>
+              <tr>
+                <th className="px-2 py-1 text-left">Parameter</th>
+                {ordered.map((set) => <th key={set.id} className="px-2 py-1 text-right">{new Date(set.recordedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</th>)}
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {parameters.map(([key, label]) => (
+                <tr key={key} className="border-t border-[var(--color-border)]">
+                  <td className="px-2 py-1 font-semibold">{label}</td>
+                  {ordered.map((set) => {
+                    const value = (set as unknown as Record<string, number | null>)[key];
+                    const severity = key === "news2" ? (Number(value) >= 7 ? "critical" : Number(value) >= 5 ? "abnormal" : "normal") : severityFor(key, value);
+                    return <td key={set.id} className={`px-2 py-1 text-right ${severityClass(severity)}`}>{value ?? "-"}</td>;
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="hidden space-y-2 max-[720px]:block">
+          {[...ordered].reverse().map((set) => (
+            <article key={set.id} className="rounded-md border border-[var(--color-border)] p-3">
+              <div className="mb-2 flex items-center justify-between gap-2 text-sm">
+                <time className="font-semibold">{new Date(set.recordedAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</time>
+                <span className={`rounded px-2 py-0.5 text-xs font-bold ${severityClass(set.news2 >= 7 ? "critical" : set.news2 >= 5 ? "abnormal" : "normal")}`}>NEWS2 {set.news2}</span>
+              </div>
+              <dl className="grid grid-cols-3 gap-2 text-sm">
+                <MobileVital label="BP" value={`${set.systolicBp ?? "-"}/${set.diastolicBp ?? "-"}`} />
+                <MobileVital label="HR" value={set.heartRate} />
+                <MobileVital label="SpO2" value={set.spo2} suffix="%" />
+                <MobileVital label="RR" value={set.respiratoryRate} />
+                <MobileVital label="Temp" value={set.temperature} suffix=" C" />
+                <MobileVital label="Pain" value={set.painScore} suffix="/10" />
+              </dl>
+            </article>
+          ))}
+        </div>
       </section>
+    </div>
+  );
+}
+
+function MobileVital({ label, value, suffix = "" }: { label: string; value: string | number | null; suffix?: string }) {
+  return (
+    <div>
+      <dt className="text-xs font-semibold text-[var(--color-ink-secondary)]">{label}</dt>
+      <dd className="font-semibold tabular-nums">{value ?? "-"}{value !== null && value !== "-" ? suffix : ""}</dd>
     </div>
   );
 }
@@ -365,6 +498,18 @@ function tile(label: string, value: number | null, prev: number | null | undefin
 }
 
 function severityClass(severity: string) {
+  if (severity === "critical") return "bg-[var(--color-red-tint)] text-[var(--color-red-text)]";
+  if (severity === "abnormal") return "bg-[var(--color-yellow-tint)] text-[var(--color-yellow-text)]";
+  return "bg-[var(--color-surface)]";
+}
+
+function headerSeverityClass(severity: string) {
+  if (severity === "critical") return "rounded bg-[var(--color-red-tint)] px-1.5 text-[var(--color-red-text)]";
+  if (severity === "abnormal") return "rounded bg-[var(--color-yellow-tint)] px-1.5 text-[var(--color-yellow-text)]";
+  return "";
+}
+
+function summarySeverityClass(severity: string) {
   if (severity === "critical") return "bg-[var(--color-red-tint)] text-[var(--color-red-text)]";
   if (severity === "abnormal") return "bg-[var(--color-yellow-tint)] text-[var(--color-yellow-text)]";
   return "bg-[var(--color-surface)]";

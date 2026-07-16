@@ -5,6 +5,13 @@ import type {
   Patient,
   Encounter,
   ClinicalEvent,
+  PatientIdentifier,
+  RelatedPerson,
+  InsurancePolicy,
+  CivilRegistryRecord,
+  EmploymentRecord,
+  MilitaryRecord,
+  PendingCase,
   Bed,
   Zone,
   Incident,
@@ -13,6 +20,16 @@ import type {
   TriageLevel,
   TriageAssessment,
   VitalsSet,
+  MedicationRecord,
+  AllergyRecord,
+  ConditionRecord,
+  OrderRecord,
+  ResultRecord,
+  ImmunizationRecord,
+  ProcedureRecord,
+  ProgramRecord,
+  BillingItem,
+  Attachment,
 } from "../types";
 
 function useLiveQuery<T>(query: () => Promise<T>, deps: unknown[], initial: T): T {
@@ -245,6 +262,227 @@ export function useAlerts(): AuditEvent[] {
       return rows;
     },
     [],
+    [],
+  );
+}
+
+// --- Patient master profile hooks (Dexie v6) ------------------------------
+
+export function usePatientIdentifiers(patientId: string | undefined): PatientIdentifier[] {
+  return useLiveQuery(
+    async () => {
+      if (!patientId) return [];
+      const rows = await db.patientIdentifiers.where("patientId").equals(patientId).toArray();
+      return rows.sort((a, b) => Number(Boolean(b.isPrimary)) - Number(Boolean(a.isPrimary)) || b.createdAt - a.createdAt);
+    },
+    [patientId],
+    [],
+  );
+}
+
+export function useRelatedPersons(patientId: string | undefined): RelatedPerson[] {
+  return useLiveQuery(
+    async () => {
+      if (!patientId) return [];
+      const rows = await db.relatedPersons.where("patientId").equals(patientId).toArray();
+      return rows.sort((a, b) => (a.contactPriority ?? 99) - (b.contactPriority ?? 99) || b.updatedAt - a.updatedAt);
+    },
+    [patientId],
+    [],
+  );
+}
+
+export function useInsurancePolicies(patientId: string | undefined): InsurancePolicy[] {
+  return useLiveQuery(
+    async () => {
+      if (!patientId) return [];
+      const rows = await db.insurancePolicies.where("patientId").equals(patientId).toArray();
+      return rows.sort((a, b) => Number(b.isDefault) - Number(a.isDefault) || b.updatedAt - a.updatedAt);
+    },
+    [patientId],
+    [],
+  );
+}
+
+export function useCivilRegistryRecord(patientId: string | undefined): CivilRegistryRecord | null {
+  return useLiveQuery(
+    async () => {
+      if (!patientId) return null;
+      return (await db.civilRegistryRecords.where("patientId").equals(patientId).first()) ?? null;
+    },
+    [patientId],
+    null,
+  );
+}
+
+export function useEmploymentRecord(patientId: string | undefined): EmploymentRecord | null {
+  return useLiveQuery(
+    async () => {
+      if (!patientId) return null;
+      return (await db.employmentRecords.where("patientId").equals(patientId).first()) ?? null;
+    },
+    [patientId],
+    null,
+  );
+}
+
+export function useMilitaryRecord(patientId: string | undefined): MilitaryRecord | null {
+  return useLiveQuery(
+    async () => {
+      if (!patientId) return null;
+      return (await db.militaryRecords.where("patientId").equals(patientId).first()) ?? null;
+    },
+    [patientId],
+    null,
+  );
+}
+
+export function usePendingCases(patientId: string | undefined): PendingCase[] {
+  return useLiveQuery(
+    async () => {
+      if (!patientId) return [];
+      const rows = await db.pendingCases.where("patientId").equals(patientId).toArray();
+      return rows.sort((a, b) => b.requestDate - a.requestDate);
+    },
+    [patientId],
+    [],
+  );
+}
+
+// --- First-class clinical domain hooks (Dexie v5) --------------------------
+
+export function useMedications(patientId: string | undefined): MedicationRecord[] {
+  return useLiveQuery(
+    async () => {
+      if (!patientId) return [];
+      const rows = await db.medications.where("patientId").equals(patientId).toArray();
+      return rows.sort((a, b) => b.createdAt - a.createdAt);
+    },
+    [patientId],
+    [],
+  );
+}
+
+export function useAllergyRecords(encounterId: string | undefined): AllergyRecord[] {
+  return useLiveQuery(
+    async () => {
+      if (!encounterId) return [];
+      const rows = await db.allergyRecords.where("encounterId").equals(encounterId).toArray();
+      return rows.sort((a, b) => b.notedAt - a.notedAt);
+    },
+    [encounterId],
+    [],
+  );
+}
+
+export function useConditions(patientId: string | undefined): ConditionRecord[] {
+  return useLiveQuery(
+    async () => {
+      if (!patientId) return [];
+      const rows = await db.conditions.where("patientId").equals(patientId).toArray();
+      return rows.sort((a, b) => b.createdAt - a.createdAt);
+    },
+    [patientId],
+    [],
+  );
+}
+
+export function useOrderRecords(encounterId: string | undefined): OrderRecord[] {
+  return useLiveQuery(
+    async () => {
+      if (!encounterId) return [];
+      const rows = await db.orderRecords.where("encounterId").equals(encounterId).toArray();
+      return rows.sort((a, b) => b.orderedAt - a.orderedAt);
+    },
+    [encounterId],
+    [],
+  );
+}
+
+export function useAllOrderRecords(): OrderRecord[] {
+  return useLiveQuery(
+    () => db.orderRecords.orderBy("orderedAt").reverse().toArray(),
+    [],
+    [],
+  );
+}
+
+export function useResultRecords(encounterId: string | undefined): ResultRecord[] {
+  return useLiveQuery(
+    async () => {
+      if (!encounterId) return [];
+      const rows = await db.resultRecords.where("encounterId").equals(encounterId).toArray();
+      return rows.sort((a, b) => b.resultedAt - a.resultedAt);
+    },
+    [encounterId],
+    [],
+  );
+}
+
+export function useAllResultRecords(): ResultRecord[] {
+  return useLiveQuery(
+    () => db.resultRecords.orderBy("resultedAt").reverse().toArray(),
+    [],
+    [],
+  );
+}
+
+export function useImmunizations(patientId: string | undefined): ImmunizationRecord[] {
+  return useLiveQuery(
+    async () => {
+      if (!patientId) return [];
+      const rows = await db.immunizations.where("patientId").equals(patientId).toArray();
+      return rows.sort((a, b) => b.createdAt - a.createdAt);
+    },
+    [patientId],
+    [],
+  );
+}
+
+export function useProcedures(encounterId: string | undefined): ProcedureRecord[] {
+  return useLiveQuery(
+    async () => {
+      if (!encounterId) return [];
+      const rows = await db.procedures.where("encounterId").equals(encounterId).toArray();
+      return rows.sort((a, b) => (b.performedAt ?? b.createdAt) - (a.performedAt ?? a.createdAt));
+    },
+    [encounterId],
+    [],
+  );
+}
+
+export function usePrograms(patientId: string | undefined): ProgramRecord[] {
+  return useLiveQuery(
+    async () => {
+      if (!patientId) return [];
+      const rows = await db.programs.where("patientId").equals(patientId).toArray();
+      return rows.sort((a, b) => b.createdAt - a.createdAt);
+    },
+    [patientId],
+    [],
+  );
+}
+
+export function useBillingItems(encounterId: string | undefined): BillingItem[] {
+  return useLiveQuery(
+    async () => {
+      if (!encounterId) return [];
+      const rows = await db.billingItems.where("encounterId").equals(encounterId).toArray();
+      return rows.sort((a, b) => b.createdAt - a.createdAt);
+    },
+    [encounterId],
+    [],
+  );
+}
+
+export function useAttachments(encounterId: string | undefined): Attachment[] {
+  return useLiveQuery(
+    async () => {
+      if (!encounterId) return [];
+      const rows = await db.attachments.where("encounterId").equals(encounterId).toArray();
+      return rows.sort((a, b) => b.uploadedAt - a.uploadedAt);
+    },
+    [encounterId],
     [],
   );
 }

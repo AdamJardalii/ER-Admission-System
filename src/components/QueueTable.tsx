@@ -1,4 +1,4 @@
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { TriageBadge } from "./TriageBadge";
 import { formatWait, isOverdue } from "../lib/triage";
 import { useAllVitalsSets } from "../db/hooks";
@@ -35,7 +35,7 @@ const STATE_LABEL: Record<string, string> = {
   unknown_status: "Unknown",
 };
 
-export function QueueTable({ rows, compact = false }: { rows: EncounterView[]; compact?: boolean }) {
+export function QueueTable({ rows, compact = false, stickyHeader = false }: { rows: EncounterView[]; compact?: boolean; stickyHeader?: boolean }) {
   const navigate = useNavigate();
   const allVitals = useAllVitalsSets();
   const cellSpacing = compact ? "px-2 py-1" : "px-2 py-1.5";
@@ -50,19 +50,20 @@ export function QueueTable({ rows, compact = false }: { rows: EncounterView[]; c
 
   return (
     <table className="w-full border-collapse text-sm">
-      <thead>
+      <thead className={stickyHeader ? "sticky top-0 z-10" : undefined}>
         <tr className="border-b border-[var(--color-border)] bg-[var(--color-surface-muted)] text-left">
-          <th className={cellSpacing}>ESI</th>
+          <th className={`${cellSpacing} w-[68px]`}>ESI</th>
           <th className={cellSpacing}>Patient</th>
-          <th className={cellSpacing}>Wait</th>
-          <th className={cellSpacing}>Location</th>
-          <th className={cellSpacing}>Status</th>
+          <th className={`${cellSpacing} w-[108px]`}>Wait</th>
+          <th className={`${cellSpacing} w-[150px] max-[620px]:hidden`}>Location</th>
+          <th className={`${cellSpacing} w-[170px] max-[520px]:hidden`}>Status</th>
         </tr>
       </thead>
       <tbody>
         {rows.map((row) => {
           const overdue = isOverdue(row.triage, row.encounter.arrivedAt);
           const latest = latestVitals(allVitals.filter((vitals) => vitals.encounterId === row.encounter.id));
+          const patientLabel = row.patient.name ?? row.patient.displayNumber;
           return (
             <tr
               key={row.encounter.id}
@@ -73,13 +74,28 @@ export function QueueTable({ rows, compact = false }: { rows: EncounterView[]; c
                 <TriageBadge level={row.triage} size="sm" />
               </td>
               <td className={cellSpacing}>
-                <div className="flex items-center gap-1.5 font-medium">
-                  {latest && latest.news2 >= 7 && <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-[var(--color-red-solid)]" title={`NEWS2 ${latest.news2}`} />}
-                  {row.patient.name ?? row.patient.displayNumber}
-                </div>
-                <div className="text-xs text-[var(--color-ink-secondary)]">
-                  {row.patient.mrn ?? row.patient.displayNumber} | {row.encounter.caseNumber ?? row.encounter.id.slice(0, 8)}
-                </div>
+                <Link
+                  to={`/patients/${row.encounter.id}`}
+                  onClick={(event) => event.stopPropagation()}
+                  aria-label={`Open ${patientLabel}, ${STATE_LABEL[row.encounter.state] ?? row.encounter.state}`}
+                  className="block min-w-0 rounded-sm"
+                >
+                  <span className="flex min-w-0 items-center gap-1.5 font-medium">
+                    {latest && latest.news2 >= 7 && (
+                      <>
+                        <span className="h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-[var(--color-red-solid)]" title={`NEWS2 ${latest.news2}`} />
+                        <span className="sr-only">Critical NEWS2 {latest.news2}.</span>
+                      </>
+                    )}
+                    <span className="truncate">{patientLabel}</span>
+                  </span>
+                  <span className="block truncate text-xs text-[var(--color-ink-secondary)] max-[520px]:hidden">
+                    {row.patient.mrn ?? row.patient.displayNumber} | {row.encounter.caseNumber ?? row.encounter.id.slice(0, 8)}
+                  </span>
+                  <span className="hidden truncate text-xs text-[var(--color-ink-secondary)] max-[520px]:block">
+                    {STATE_LABEL[row.encounter.state] ?? row.encounter.state}
+                  </span>
+                </Link>
               </td>
               <td className={cellSpacing}>
                 <span className={overdue ? "font-medium text-[var(--color-red-solid)]" : ""}>
@@ -87,8 +103,8 @@ export function QueueTable({ rows, compact = false }: { rows: EncounterView[]; c
                   {overdue ? " | overdue" : ""}
                 </span>
               </td>
-              <td className={cellSpacing}>{row.encounter.currentLocationName ?? "Unassigned"}</td>
-              <td className={cellSpacing}>{STATE_LABEL[row.encounter.state] ?? row.encounter.state}</td>
+              <td className={`${cellSpacing} max-[620px]:hidden`}><span className="block truncate" title={row.encounter.currentLocationName ?? "Unassigned"}>{row.encounter.currentLocationName ?? "Unassigned"}</span></td>
+              <td className={`${cellSpacing} max-[520px]:hidden`}><span className="block truncate" title={STATE_LABEL[row.encounter.state] ?? row.encounter.state}>{STATE_LABEL[row.encounter.state] ?? row.encounter.state}</span></td>
             </tr>
           );
         })}

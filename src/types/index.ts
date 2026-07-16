@@ -8,6 +8,31 @@ export type AgeBand = "0-1" | "1-5" | "5-12" | "13-17" | "18-30" | "31-50" | "51
 
 export type ArrivalMethod = "walk_in" | "ambulance" | "transfer" | "police" | "other";
 
+export type EncounterStatus =
+  | "PRE_ARRIVAL"
+  | "ARRIVED"
+  | "TRIAGED"
+  | "WAITING"
+  | "ROOMED"
+  | "IN_ASSESSMENT"
+  | "AWAITING_RESULTS"
+  | "DISPOSITION_PENDING"
+  | "ADMIT_REQUESTED"
+  | "ACCEPTANCE_PENDING"
+  | "BED_ASSIGNED"
+  | "BOARDING"
+  | "DISCHARGE_PENDING"
+  | "TRANSFER_PENDING"
+  | "HANDOFF_PENDING"
+  | "READY_FOR_DEPARTURE"
+  | "DEPARTED_ADMITTED"
+  | "DEPARTED_DISCHARGED"
+  | "DEPARTED_TRANSFERRED"
+  | "LWBS"
+  | "AMA"
+  | "ELOPED"
+  | "DECEASED";
+
 export type EncounterState =
   | "arrived"
   | "registered"
@@ -62,6 +87,8 @@ export type OrderType =
   | "medication"
   | "procedure"
   | "consultation"
+  | "treatment"
+  | "nursing"
   | "blood_product"
   | "observation"
   | "admission"
@@ -73,6 +100,9 @@ export type OrderStatus =
   | "draft"
   | "ordered"
   | "acknowledged"
+  | "scheduled"
+  | "specimen_pending"
+  | "specimen_collected"
   | "in_progress"
   | "completed"
   | "result_available"
@@ -91,15 +121,63 @@ export interface Patient {
   id: string;
   displayNumber: string;
   mrn?: string | null;
+  patientType?: "standard" | "unknown" | "trauma" | "visitor" | "staff" | string | null;
+  confidentialityLevel?: "normal" | "restricted" | "vip" | string | null;
+  title?: string | null;
+  secondaryMrn?: string | null;
   name: string | null;
+  firstNameEn?: string | null;
+  middleNameEn?: string | null;
+  lastNameEn?: string | null;
+  fourthNameEn?: string | null;
+  firstNameAr?: string | null;
+  middleNameAr?: string | null;
+  lastNameAr?: string | null;
+  fourthNameAr?: string | null;
+  motherNameEn?: string | null;
+  motherNameAr?: string | null;
+  maidenName?: string | null;
+  spouseNameEn?: string | null;
+  spouseNameAr?: string | null;
   dateOfBirth: string | null;
+  ageValue?: number | null;
+  ageUnit?: "years" | "months" | "days" | null;
+  ageCalculated?: boolean;
   sex: Sex | null;
+  sexAtBirth?: Sex | null;
+  genderIdentity?: string | null;
   phone: string | null;
+  mobileSecondary?: string | null;
+  homePhone?: string | null;
+  workPhone?: string | null;
+  fax?: string | null;
+  preferredContactMethod?: "mobile" | "home_phone" | "work_phone" | "email" | "sms" | "none" | string | null;
+  mayReceiveSms?: boolean;
+  mayReceiveEmail?: boolean;
+  communicationNotes?: string | null;
   nationalId?: string | null;
   email?: string | null;
   address?: string | null;
+  addressCountry?: string | null;
+  addressGovernorate?: string | null;
+  addressDistrict?: string | null;
+  addressCity?: string | null;
+  addressVillage?: string | null;
+  addressZone?: string | null;
+  addressArea?: string | null;
+  addressStreet?: string | null;
+  addressBuilding?: string | null;
+  addressFloor?: string | null;
+  addressAdditionalDetails?: string | null;
   city?: string | null;
+  placeOfBirthCountry?: string | null;
+  placeOfBirthGovernorate?: string | null;
+  placeOfBirthDistrict?: string | null;
+  placeOfBirthCity?: string | null;
+  placeOfBirthVillage?: string | null;
+  placeOfBirthLocality?: string | null;
   nationality?: string | null;
+  maritalStatus?: string | null;
   preferredLanguage?: string | null;
   emergencyContact?: string | null;
   emergencyContactName?: string | null;
@@ -108,7 +186,13 @@ export interface Patient {
   insurance?: string | null;
   insuranceProvider?: string | null;
   insurancePolicyNumber?: string | null;
+  defaultInsuranceId?: string | null;
   bloodGroup?: string | null;
+  vip?: boolean;
+  deceased?: boolean;
+  deceasedDate?: string | null;
+  religion?: string | null;
+  representativeGuardianName?: string | null;
   knownConditions?: string[];
   currentMedications?: string[];
   photoBlob: Blob | null;
@@ -118,18 +202,131 @@ export interface Patient {
   duplicateOverride?: boolean;
   catastropheTags?: string[];
   mergedIntoPatientId?: string | null;
+  isSynthetic?: boolean;
   mergedAt?: number | null;
   mergeUndoneAt?: number | null;
   createdAt: number;
 }
 
-export type IdentifierType = "mrn" | "national_id" | "catastrophe_tag";
+export type IdentifierType = "mrn" | "national_id" | "catastrophe_tag" | "passport" | "civil_card" | "unrwa_card" | "ration_card" | "military_number" | "legacy_mrn" | "other";
 
 export interface PatientIdentifier {
   id: string;
   patientId: string;
   type: IdentifierType;
   value: string;
+  issuingCountry?: string | null;
+  issueDate?: string | null;
+  expiryDate?: string | null;
+  isPrimary?: boolean;
+  verificationStatus?: "unverified" | "verified" | "rejected" | "expired" | string | null;
+  verifiedBy?: string | null;
+  verificationDate?: string | null;
+  frontImageBlob?: Blob | null;
+  backImageBlob?: Blob | null;
+  notes?: string | null;
+  createdAt: number;
+}
+
+export interface RelatedPerson {
+  id: string;
+  patientId: string;
+  fullName: string;
+  englishName: string | null;
+  arabicName: string | null;
+  relationship: string | null;
+  mobilePrimary: string | null;
+  mobileSecondary: string | null;
+  email: string | null;
+  address: string | null;
+  nationalId: string | null;
+  isEmergencyContact: boolean;
+  isNextOfKin: boolean;
+  isSpouse: boolean;
+  isParent: boolean;
+  isLegalGuardian: boolean;
+  isAuthorizedRepresentative: boolean;
+  preferredContactMethod: string | null;
+  contactPriority: number | null;
+  notes: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface InsurancePolicy {
+  id: string;
+  patientId: string;
+  payerId: string | null;
+  payerName: string;
+  plan: string | null;
+  membershipNumber: string | null;
+  policyNumber: string | null;
+  coverageClass: string | null;
+  subscriberRelationship: string | null;
+  subscriberName: string | null;
+  subscriberId: string | null;
+  effectiveDate: string | null;
+  expiryDate: string | null;
+  isDefault: boolean;
+  approvalRequired: boolean;
+  notes: string | null;
+  cardImageBlob: Blob | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CivilRegistryRecord {
+  id: string;
+  patientId: string;
+  sijilNumber: string | null;
+  sahifaNumber: string | null;
+  daira: string | null;
+  registryCountry: string | null;
+  registryGovernorate: string | null;
+  registryDistrict: string | null;
+  registryLocality: string | null;
+  registryNotes: string | null;
+  updatedAt: number;
+}
+
+export interface EmploymentRecord {
+  id: string;
+  patientId: string;
+  occupation: string | null;
+  employmentStatus: string | null;
+  employer: string | null;
+  jobTitle: string | null;
+  workPhone: string | null;
+  workAddress: string | null;
+  industry: string | null;
+  notes: string | null;
+  updatedAt: number;
+}
+
+export interface MilitaryRecord {
+  id: string;
+  patientId: string;
+  enabled: boolean;
+  institution: string | null;
+  section: string | null;
+  positionOrRank: string | null;
+  serviceNumber: string | null;
+  zone: string | null;
+  notes: string | null;
+  updatedAt: number;
+}
+
+export interface PendingCase {
+  id: string;
+  patientId: string;
+  encounterId: string | null;
+  caseNumber: string;
+  requestNumber: string | null;
+  requestDate: number;
+  requestType: string;
+  pendingStatus: "pending_specimen" | "pending_approval" | "pending_insurance" | "pending_consultation" | "pending_admission" | "pending_bed" | "pending_documentation" | string;
+  responsibleDepartment: string | null;
+  assignedOwner: string | null;
   createdAt: number;
 }
 
@@ -142,6 +339,7 @@ export interface Encounter {
   pathway?: EncounterPathway;
   arrivedAt: number;
   state: EncounterState;
+  workflowStatus?: EncounterStatus;
   disposition: Disposition | null;
   closedAt: number | null;
   chiefComplaint: string | null;
@@ -166,6 +364,24 @@ export interface StateTransition {
   device: string | null;
   source: "online" | "offline" | "local";
   timestamp: number;
+  workflowFromStatus?: EncounterStatus | null;
+  workflowToStatus?: EncounterStatus;
+  actorId?: string | null;
+  actorName?: string | null;
+  occurredAt?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface EncounterEvent {
+  id: string;
+  encounterId: string;
+  fromStatus: EncounterStatus | null;
+  toStatus: EncounterStatus;
+  actorId: string;
+  actorName: string;
+  occurredAt: string;
+  reason?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface TriageAssessment {
@@ -227,6 +443,28 @@ export interface AuditEvent {
   timestamp: number;
   mode: Mode;
   actor?: string | null;
+  patientId?: string | null;
+  encounterId?: string | null;
+  reason?: string | null;
+  actorId?: string | null;
+  demoRole?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export type PrototypeNotificationSeverity = "info" | "warning" | "critical";
+
+export interface PrototypeNotification {
+  id: string;
+  type: string;
+  severity: PrototypeNotificationSeverity;
+  title: string;
+  message: string;
+  patientId: string | null;
+  encounterId: string | null;
+  createdAt: number;
+  readAt: number | null;
+  acknowledgedAt: number | null;
+  acknowledgedBy: string | null;
 }
 
 export type Avpu = "Alert" | "Voice" | "Pain" | "Unresponsive";
@@ -343,6 +581,177 @@ export interface Bed {
   name: string;
   zone: string;
   encounterId: string | null;
+}
+
+// --- First-class clinical domain records (Dexie v5) ------------------------
+// Each mirrors the VitalsSet convention: id-keyed, scoped by patientId and/or
+// encounterId, with a status/date field for sorting and filtering.
+
+export type MedicationStatus = "active" | "past" | "stopped";
+
+export interface MedicationRecord {
+  id: string;
+  patientId: string;
+  encounterId: string | null;
+  name: string;
+  dose: string | null;
+  route: string | null;
+  frequency: string | null;
+  status: MedicationStatus;
+  startedAt: number | null;
+  stoppedAt: number | null;
+  prescriber: string | null;
+  notes: string | null;
+  createdAt: number;
+}
+
+export type AllergySeverity = "mild" | "moderate" | "severe";
+export type AllergyRecordStatus = "active" | "inactive";
+
+export interface AllergyRecord {
+  id: string;
+  encounterId: string;
+  patientId: string;
+  substance: string;
+  reaction: string | null;
+  severity: AllergySeverity;
+  status: AllergyRecordStatus;
+  notedAt: number;
+  actor: string | null;
+}
+
+export type ConditionStatus = "active" | "resolved" | "chronic";
+
+export interface ConditionRecord {
+  id: string;
+  patientId: string;
+  encounterId: string | null;
+  name: string;
+  category: string | null;
+  onsetDate: string | null;
+  status: ConditionStatus;
+  notes: string | null;
+  createdAt: number;
+}
+
+export interface OrderRecord {
+  id: string;
+  encounterId: string;
+  patientId: string;
+  orderType: OrderType;
+  name: string;
+  details: string | null;
+  priority: "routine" | "urgent" | "stat";
+  status: OrderStatus;
+  orderedAt: number;
+  actor: string | null;
+  requestedDepartment?: string | null;
+  clinicalIndication?: string | null;
+  instructions?: string | null;
+  statusUpdatedAt?: number | null;
+  statusUpdatedBy?: string | null;
+  cancelledAt?: number | null;
+  cancellationReason?: string | null;
+}
+
+export type ResultFlag = "normal" | "abnormal" | "critical";
+export type ResultStatus = "pending" | "preliminary" | "final" | "corrected" | "cancelled";
+export type ResultReviewStatus = "unreviewed" | "reviewed" | "acknowledged" | "action_required";
+
+export interface ResultRecord {
+  id: string;
+  encounterId: string;
+  patientId: string;
+  orderId: string | null;
+  name: string;
+  value: string | null;
+  unit: string | null;
+  referenceRange: string | null;
+  flag: ResultFlag;
+  resultedAt: number;
+  verifiedBy: string | null;
+  status?: ResultStatus;
+  reviewStatus?: ResultReviewStatus;
+  reviewedAt?: number | null;
+  reviewedBy?: string | null;
+  acknowledgedAt?: number | null;
+  acknowledgedBy?: string | null;
+  criticalActionTaken?: string | null;
+}
+
+export type ImmunizationStatus = "administered" | "due" | "declined";
+
+export interface ImmunizationRecord {
+  id: string;
+  patientId: string;
+  encounterId: string | null;
+  vaccine: string;
+  dose: string | null;
+  date: string | null;
+  site: string | null;
+  lot: string | null;
+  provider: string | null;
+  status: ImmunizationStatus;
+  createdAt: number;
+}
+
+export interface ProcedureRecord {
+  id: string;
+  encounterId: string;
+  patientId: string;
+  name: string;
+  category: string | null;
+  performedAt: number | null;
+  operator: string | null;
+  site: string | null;
+  outcome: string | null;
+  notes: string | null;
+  createdAt: number;
+}
+
+export type ProgramType = "chronic-care" | "screening" | "follow-up" | "other";
+export type ProgramStatus = "enrolled" | "active" | "completed" | "discharged";
+
+export interface ProgramRecord {
+  id: string;
+  patientId: string;
+  encounterId: string | null;
+  name: string;
+  type: ProgramType;
+  enrolledAt: number | null;
+  status: ProgramStatus;
+  coordinator: string | null;
+  notes: string | null;
+  createdAt: number;
+}
+
+export type BillingStatus = "pending" | "billed" | "paid" | "waived";
+
+export interface BillingItem {
+  id: string;
+  encounterId: string;
+  patientId: string;
+  code: string | null;
+  description: string;
+  category: string | null;
+  amount: number | null;
+  status: BillingStatus;
+  createdAt: number;
+}
+
+export type AttachmentCategory = "imaging" | "document" | "photo" | "consent" | "other";
+
+export interface Attachment {
+  id: string;
+  encounterId: string;
+  patientId: string;
+  title: string;
+  category: AttachmentCategory;
+  fileName: string | null;
+  mimeType: string | null;
+  blob: Blob | null;
+  uploadedAt: number;
+  uploadedBy: string | null;
 }
 
 export interface Zone {

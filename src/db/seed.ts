@@ -8,6 +8,13 @@ import {
   seedIdentityCounters,
 } from "./ids";
 import { writeAudit } from "./audit";
+import {
+  encounterTransitions,
+  isTerminalEncounterStatus,
+  legacyStateForWorkflowStatus,
+  workflowStatusForEncounter,
+  workflowStatusFromLegacy,
+} from "../domain/encounterStateMachine";
 import { DEFAULT_REFERENCE_RANGES, DEFAULT_VITALS_SCHEDULES, calculateBmi, implausibleFields, scoreNews2 } from "../lib/vitals";
 import type {
   Patient,
@@ -19,8 +26,27 @@ import type {
   ReconciliationItem,
   StartColor,
   PatientIdentifier,
+  RelatedPerson,
+  InsurancePolicy,
+  CivilRegistryRecord,
+  EmploymentRecord,
+  MilitaryRecord,
+  PendingCase,
   VitalsSet,
   Avpu,
+  MedicationRecord,
+  AllergyRecord,
+  ConditionRecord,
+  OrderRecord,
+  ResultRecord,
+  ImmunizationRecord,
+  ProcedureRecord,
+  ProgramRecord,
+  BillingItem,
+  Attachment,
+  AuditEvent,
+  EncounterStatus,
+  StateTransition,
 } from "../types";
 
 const ZONES: Zone[] = [
@@ -106,6 +132,9 @@ async function seedInitialDataInner() {
     await ensureMockPatientHistory();
     await ensurePerfectMockPatient();
     await ensureClinicalFoundationSeeds();
+    await ensureDomainSeeds();
+    await ensureRegistrationProfileSeed();
+    await ensurePhaseOneSeedMetadata();
     return;
   }
 
@@ -240,6 +269,348 @@ async function seedInitialDataInner() {
   await ensureMockPatientHistory();
   await ensurePerfectMockPatient();
   await ensureClinicalFoundationSeeds();
+  await ensureDomainSeeds();
+  await ensureRegistrationProfileSeed();
+  await ensurePhaseOneSeedMetadata();
+}
+
+const PHASE_ONE_SEED_MARKER = "phase1_foundation_seed_v1";
+
+function seedPathTo(target: EncounterStatus) {
+  const queue: EncounterStatus[][] = [["ARRIVED"]];
+  const visited = new Set<EncounterStatus>();
+  while (queue.length) {
+    const path = queue.shift()!;
+    const current = path[path.length - 1];
+    if (current === target) return path;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const next of encounterTransitions[current]) queue.push([...path, next]);
+  }
+  throw new Error(`No synthetic seed path exists for ${target}.`);
+}
+
+function seedTransitionRows(encounterId: string, path: EncounterStatus[], startedAt: number, endedAt: number): StateTransition[] {
+  const interval = Math.max(1, Math.floor((endedAt - startedAt) / Math.max(1, path.length - 1)));
+  return path.map((status, index) => {
+    const previousStatus = path[index - 1] ?? null;
+    const timestamp = startedAt + interval * index;
+    return {
+      id: uuid(),
+      encounterId,
+      previousState: previousStatus ? legacyStateForWorkflowStatus(previousStatus) : null,
+      newState: legacyStateForWorkflowStatus(status),
+      reason: index === 0 ? "Synthetic encounter seeded" : `Synthetic workflow advanced to ${status}`,
+      actor: "Synthetic seed",
+      device: "local browser",
+      source: "local",
+      timestamp,
+      workflowFromStatus: previousStatus,
+      workflowToStatus: status,
+      actorId: "seed-system",
+      actorName: "Synthetic seed",
+      occurredAt: new Date(timestamp).toISOString(),
+      metadata: { synthetic: true },
+    };
+  });
+}
+
+function seedDisposition(status: EncounterStatus): Encounter["disposition"] {
+  if (["ADMIT_REQUESTED", "ACCEPTANCE_PENDING", "BED_ASSIGNED", "BOARDING", "DEPARTED_ADMITTED"].includes(status)) return "admitted";
+  if (["TRANSFER_PENDING", "HANDOFF_PENDING", "DEPARTED_TRANSFERRED"].includes(status)) return "transferred";
+  if (["DISCHARGE_PENDING", "READY_FOR_DEPARTURE", "DEPARTED_DISCHARGED"].includes(status)) return "discharged";
+  return null;
+}
+
+async function ensurePhaseOneFoundationSeed() {
+  const completed = await db.auditEvents.where("action").equals(PHASE_ONE_SEED_MARKER).first();
+  if (completed) return;
+
+  const now = Date.now();
+  const existingPatients = await db.patients.toArray();
+  const newPatients: Patient[] = [];
+  const newIdentifiers: PatientIdentifier[] = [];
+  const missingPatients = Math.max(0, 50 - existingPatients.length);
+  for (let index = 0; index < missingPatients; index += 1) {
+    const sequence = existingPatients.length + index + 1;
+    const id = uuid();
+    const mrn = nextMrn();
+    const createdAt = now - (sequence + 90) * 24 * 60 * 60 * 1000;
+    newPatients.push({
+      id,
+      displayNumber: nextDisplayNumber("normal"),
+      mrn,
+      name: LEBANESE_NAMES[sequence % LEBANESE_NAMES.length],
+      dateOfBirth: `${1955 + (sequence % 48)}-${String((sequence % 12) + 1).padStart(2, "0")}-${String((sequence % 27) + 1).padStart(2, "0")}`,
+      sex: sequence % 2 === 0 ? "female" : "male",
+      phone: `+961 ${sequence % 2 === 0 ? 3 : 71} ${String(200000 + sequence * 137).slice(-6)}`,
+      photoBlob: null,
+      identityStatus: sequence % 11 === 0 ? "provisional" : "confirmed",
+      estimatedAgeRange: null,
+      registrationComplete: sequence % 9 !== 0,
+      isSynthetic: true,
+      createdAt,
+    });
+    newIdentifiers.push({ id: uuid(), patientId: id, type: "mrn", value: mrn, isPrimary: true, createdAt });
+  }
+  if (newPatients.length) {
+    await db.patients.bulkAdd(newPatients);
+    await db.patientIdentifiers.bulkAdd(newIdentifiers);
+  }
+
+  const patients = await db.patients.toArray();
+  const existingEncounters = await db.encounters.toArray();
+  const activeEncounters = existingEncounters.filter(
+    (encounter) => !isTerminalEncounterStatus(workflowStatusForEncounter(encounter)),
+  );
+  const patientsWithActiveEncounter = new Set(activeEncounters.map((encounter) => encounter.patientId));
+  const availablePatients = patients.filter((patient) => !patientsWithActiveEncounter.has(patient.id));
+  const activeTargets: EncounterStatus[] = [
+    "TRIAGED",
+    "WAITING",
+    "ROOMED",
+    "IN_ASSESSMENT",
+    "AWAITING_RESULTS",
+    "DISPOSITION_PENDING",
+    "ADMIT_REQUESTED",
+    "ACCEPTANCE_PENDING",
+    "BOARDING",
+    "DISCHARGE_PENDING",
+    "TRANSFER_PENDING",
+  ];
+  const activeToAdd = Math.max(0, Math.min(30 - activeEncounters.length, availablePatients.length));
+  const encountersToAdd: Encounter[] = [];
+  const triageToAdd: TriageAssessment[] = [];
+  const eventsToAdd: ClinicalEvent[] = [];
+  const transitionsToAdd: StateTransition[] = [];
+  const auditsToAdd: AuditEvent[] = [];
+
+  for (let index = 0; index < activeToAdd; index += 1) {
+    const patient = availablePatients[index];
+    const target = activeTargets[index % activeTargets.length];
+    const path = seedPathTo(target);
+    const arrivedAt = now - (18 + index * 7) * 60_000;
+    const encounterId = uuid();
+    const roomed = path.includes("ROOMED");
+    encountersToAdd.push({
+      id: encounterId,
+      caseNumber: nextCaseNumber(),
+      patientId: patient.id,
+      incidentId: null,
+      modeAtCreation: "normal",
+      pathway: index % 8 === 0 ? "critical" : index % 5 === 0 ? "fast_track" : "standard",
+      arrivedAt,
+      state: legacyStateForWorkflowStatus(target),
+      workflowStatus: target,
+      disposition: seedDisposition(target),
+      closedAt: null,
+      chiefComplaint: CHIEF_COMPLAINTS[index % CHIEF_COMPLAINTS.length],
+      arrivalMethod: index % 6 === 0 ? "ambulance" : "walk_in",
+      referralSource: null,
+      allergies: index % 7 === 0 ? [ALLERGIES_POOL[index % ALLERGIES_POOL.length]] : [],
+      currentLocationName: roomed ? `AC-${(index % 10) + 1}` : null,
+      currentZone: roomed ? "zone-acute" : null,
+      currentProvider: roomed ? "Dr. Sami Rahal" : null,
+      assignedNurse: roomed ? "Omar Khalil" : null,
+      updatedAt: now - index * 60_000,
+    });
+    triageToAdd.push({
+      id: uuid(),
+      encounterId,
+      algorithm: "esi",
+      level: ((index % 5) + 1) as 1 | 2 | 3 | 4 | 5,
+      performedAt: arrivedAt + 4 * 60_000,
+      note: "Synthetic triage scenario",
+    });
+    eventsToAdd.push({
+      id: uuid(),
+      encounterId,
+      type: "created",
+      content: { synthetic: true, scenario: target },
+      attachmentBlob: null,
+      recordedAt: arrivedAt,
+    });
+    transitionsToAdd.push(...seedTransitionRows(encounterId, path, arrivedAt, now - index * 60_000));
+    auditsToAdd.push({
+      id: uuid(),
+      entityType: "encounter",
+      entityId: encounterId,
+      action: "synthetic_encounter_seeded",
+      previousValue: null,
+      newValue: target,
+      timestamp: arrivedAt,
+      mode: "normal",
+      actor: "Synthetic seed",
+      actorId: "seed-system",
+      demoRole: "administrator",
+      patientId: patient.id,
+      encounterId,
+      metadata: { synthetic: true },
+    });
+  }
+
+  const historicalCount = existingEncounters.filter((encounter) => isTerminalEncounterStatus(workflowStatusForEncounter(encounter))).length;
+  const historicalToAdd = Math.max(0, 60 - historicalCount);
+  for (let index = 0; index < historicalToAdd; index += 1) {
+    const patient = patients[index % patients.length];
+    const arrivedAt = now - (index + 12) * 36 * 60 * 60 * 1000;
+    const closedAt = arrivedAt + (85 + (index % 90)) * 60_000;
+    const encounterId = uuid();
+    const target: EncounterStatus = "DEPARTED_DISCHARGED";
+    encountersToAdd.push({
+      id: encounterId,
+      caseNumber: nextCaseNumber(new Date(arrivedAt).getFullYear()),
+      patientId: patient.id,
+      incidentId: null,
+      modeAtCreation: "normal",
+      pathway: "standard",
+      arrivedAt,
+      state: "discharged",
+      workflowStatus: target,
+      disposition: "discharged",
+      closedAt,
+      chiefComplaint: CHIEF_COMPLAINTS[(index + 3) % CHIEF_COMPLAINTS.length],
+      arrivalMethod: index % 9 === 0 ? "ambulance" : "walk_in",
+      referralSource: null,
+      allergies: [],
+      currentLocationName: null,
+      currentZone: null,
+      currentProvider: index % 2 === 0 ? "Dr. Sami Rahal" : "Dr. Laila Daher",
+      updatedAt: closedAt,
+    });
+    triageToAdd.push({
+      id: uuid(),
+      encounterId,
+      algorithm: "esi",
+      level: (((index + 2) % 5) + 1) as 1 | 2 | 3 | 4 | 5,
+      performedAt: arrivedAt + 5 * 60_000,
+      note: "Synthetic historical triage",
+    });
+    eventsToAdd.push(
+      { id: uuid(), encounterId, type: "created", content: { synthetic: true }, attachmentBlob: null, recordedAt: arrivedAt },
+      { id: uuid(), encounterId, type: "disposition", content: { disposition: "discharged", synthetic: true }, attachmentBlob: null, recordedAt: closedAt },
+    );
+    transitionsToAdd.push(...seedTransitionRows(encounterId, seedPathTo(target), arrivedAt, closedAt));
+    auditsToAdd.push({
+      id: uuid(),
+      entityType: "encounter",
+      entityId: encounterId,
+      action: "synthetic_historical_encounter_seeded",
+      previousValue: null,
+      newValue: target,
+      timestamp: closedAt,
+      mode: "normal",
+      actor: "Synthetic seed",
+      actorId: "seed-system",
+      demoRole: "administrator",
+      patientId: patient.id,
+      encounterId,
+      metadata: { synthetic: true },
+    });
+  }
+
+  await db.transaction("rw", db.encounters, db.triageAssessments, db.clinicalEvents, db.stateTransitions, db.auditEvents, async () => {
+    if (encountersToAdd.length) await db.encounters.bulkAdd(encountersToAdd);
+    if (triageToAdd.length) await db.triageAssessments.bulkAdd(triageToAdd);
+    if (eventsToAdd.length) await db.clinicalEvents.bulkAdd(eventsToAdd);
+    if (transitionsToAdd.length) await db.stateTransitions.bulkAdd(transitionsToAdd);
+    if (auditsToAdd.length) await db.auditEvents.bulkAdd(auditsToAdd);
+    await db.auditEvents.add({
+      id: uuid(),
+      entityType: "system",
+      entityId: "prototype-seed",
+      action: PHASE_ONE_SEED_MARKER,
+      previousValue: null,
+      newValue: "Synthetic Phase 1 foundation seeded",
+      timestamp: Date.now(),
+      mode: "normal",
+      actor: "Synthetic seed",
+      actorId: "seed-system",
+      demoRole: "administrator",
+      metadata: { synthetic: true, minimumPatients: 50, activeEncounters: 30, historicalEncounters: 60 },
+    });
+  });
+}
+
+async function ensurePhaseOneSeedMetadata() {
+  await ensurePhaseOneFoundationSeed();
+  const [patients, encounters, transitions, audits] = await Promise.all([
+    db.patients.toArray(),
+    db.encounters.toArray(),
+    db.stateTransitions.toArray(),
+    db.auditEvents.toArray(),
+  ]);
+  const encountersById = new Map(encounters.map((encounter) => [encounter.id, encounter]));
+
+  await db.transaction("rw", db.patients, db.encounters, db.stateTransitions, db.auditEvents, async () => {
+    for (const patient of patients) {
+      if (patient.isSynthetic !== true) await db.patients.update(patient.id, { isSynthetic: true });
+    }
+    for (const encounter of encounters) {
+      if (!encounter.workflowStatus) {
+        await db.encounters.update(encounter.id, {
+          workflowStatus: workflowStatusFromLegacy(encounter.state, encounter.disposition),
+        });
+      }
+    }
+    for (const transition of transitions) {
+      const encounter = encountersById.get(transition.encounterId);
+      const updates = {
+        workflowFromStatus:
+          transition.workflowFromStatus ??
+          (transition.previousState ? workflowStatusFromLegacy(transition.previousState, encounter?.disposition ?? null) : null),
+        workflowToStatus:
+          transition.workflowToStatus ?? workflowStatusFromLegacy(transition.newState, encounter?.disposition ?? null),
+        occurredAt: transition.occurredAt ?? new Date(transition.timestamp).toISOString(),
+        actorName: transition.actorName ?? transition.actor ?? "Synthetic seed",
+      };
+      if (!transition.workflowToStatus || !transition.occurredAt || !transition.actorName) {
+        await db.stateTransitions.update(transition.id, updates);
+      }
+    }
+    for (const audit of audits) {
+      if (!audit.actor) {
+        await db.auditEvents.update(audit.id, {
+          actor: "Synthetic seed",
+          actorId: audit.actorId ?? "seed-system",
+          demoRole: audit.demoRole ?? "administrator",
+        });
+      }
+    }
+  });
+
+  if ((await db.prototypeNotifications.count()) === 0) {
+    const active = encounters.filter((encounter) => !encounter.closedAt).slice(0, 2);
+    const now = Date.now();
+    await db.prototypeNotifications.bulkAdd([
+      {
+        id: uuid(),
+        type: "prototype_safety",
+        severity: "warning",
+        title: "Prototype thresholds require review",
+        message: "Operational and clinical thresholds in this training build are not validated for patient care.",
+        patientId: null,
+        encounterId: null,
+        createdAt: now - 8 * 60_000,
+        readAt: null,
+        acknowledgedAt: null,
+        acknowledgedBy: null,
+      },
+      {
+        id: uuid(),
+        type: "registration_incomplete",
+        severity: "info",
+        title: "Synthetic registration follow-up",
+        message: "A fictional patient record is available for registration workflow testing.",
+        patientId: active[0]?.patientId ?? null,
+        encounterId: active[0]?.id ?? null,
+        createdAt: now - 4 * 60_000,
+        readAt: null,
+        acknowledgedAt: null,
+        acknowledgedBy: null,
+      },
+    ]);
+  }
 }
 
 async function ensureMockPatientHistory() {
@@ -635,6 +1006,306 @@ async function ensureClinicalFoundationSeeds() {
     await addSeedVitals(deteriorating.id, deteriorating.patientId, Date.now() - 42 * 60 * 1000, { rr: 24, spo2: 93, hr: 108, sbp: 104, temp: 38.5 });
     await addSeedVitals(deteriorating.id, deteriorating.patientId, Date.now() - 8 * 60 * 1000, { rr: 28, spo2: 91, hr: 122, sbp: 96, temp: 39.2, o2: true });
   }
+}
+
+// Seed the fully-scripted demo patient with rows in every first-class domain
+// table so each chart tab shows realistic data out of the box. Idempotent:
+// keyed by deterministic ids so re-runs replace rather than duplicate.
+async function ensureDomainSeeds() {
+  const patientId = PERFECT_DEMO_PATIENT_ID;
+  const encounterId = PERFECT_DEMO_ENCOUNTER_ID;
+  const patient = await db.patients.get(patientId);
+  if (!patient) return;
+  const now = Date.now();
+  const daysAgo = (d: number) => now - d * 24 * 60 * 60 * 1000;
+  const minsAgo = (m: number) => now - m * 60 * 1000;
+
+  const medications: MedicationRecord[] = [
+    { id: "demo-med-1", patientId, encounterId: null, name: "Amlodipine", dose: "5 mg", route: "PO", frequency: "Once daily", status: "active", startedAt: daysAgo(400), stoppedAt: null, prescriber: "Dr. Lina Khoury", notes: "For hypertension", createdAt: daysAgo(400) },
+    { id: "demo-med-2", patientId, encounterId: null, name: "Omeprazole", dose: "20 mg", route: "PO", frequency: "Once daily", status: "active", startedAt: daysAgo(210), stoppedAt: null, prescriber: "Dr. Nadim Aoun", notes: "For GERD", createdAt: daysAgo(210) },
+    { id: "demo-med-3", patientId, encounterId, name: "Aspirin", dose: "324 mg", route: "PO", frequency: "STAT", status: "active", startedAt: minsAgo(74), stoppedAt: null, prescriber: "Dr. Lina Khoury", notes: "Given in ER for chest pain", createdAt: minsAgo(74) },
+    { id: "demo-med-4", patientId, encounterId: null, name: "Ibuprofen", dose: "400 mg", route: "PO", frequency: "PRN", status: "past", startedAt: daysAgo(600), stoppedAt: daysAgo(560), prescriber: "Dr. Sara Daou", notes: "Course completed", createdAt: daysAgo(600) },
+  ];
+
+  const allergyRecords: AllergyRecord[] = [
+    { id: "demo-allergy-1", encounterId, patientId, substance: "Penicillin", reaction: "Urticaria", severity: "moderate", status: "active", notedAt: daysAgo(500), actor: "Dr. Lina Khoury" },
+  ];
+
+  const conditions: ConditionRecord[] = [
+    { id: "demo-cond-1", patientId, encounterId: null, name: "Hypertension", category: "Cardiovascular", onsetDate: "2022-05-01", status: "chronic", notes: "Well controlled on amlodipine", createdAt: daysAgo(400) },
+    { id: "demo-cond-2", patientId, encounterId: null, name: "Gastroesophageal reflux disease", category: "Gastrointestinal", onsetDate: "2023-02-14", status: "active", notes: null, createdAt: daysAgo(210) },
+  ];
+
+  const orderRecords: OrderRecord[] = [
+    { id: "demo-order-1", encounterId, patientId, orderType: "procedure", name: "12-lead ECG", details: "Perform within 10 minutes", priority: "stat", status: "completed", orderedAt: minsAgo(80), actor: "Dr. Lina Khoury" },
+    { id: "demo-order-2", encounterId, patientId, orderType: "laboratory", name: "High-sensitivity troponin", details: "Baseline and 2h repeat", priority: "stat", status: "result_available", orderedAt: minsAgo(79), actor: "Dr. Lina Khoury" },
+    { id: "demo-order-3", encounterId, patientId, orderType: "imaging", name: "Portable chest radiograph", details: "Evaluate chest pain and dyspnea", priority: "urgent", status: "completed", orderedAt: minsAgo(77), actor: "Dr. Lina Khoury" },
+  ];
+
+  const resultRecords: ResultRecord[] = [
+    { id: "demo-result-1", encounterId, patientId, orderId: "demo-order-2", name: "Troponin I (hs)", value: "4", unit: "ng/L", referenceRange: "<14", flag: "normal", resultedAt: minsAgo(50), verifiedBy: "Lab Technologist Salma N." },
+    { id: "demo-result-2", encounterId, patientId, orderId: null, name: "Hemoglobin", value: "13.4", unit: "g/dL", referenceRange: "12.0-16.0", flag: "normal", resultedAt: minsAgo(48), verifiedBy: "Lab Technologist Salma N." },
+    { id: "demo-result-3", encounterId, patientId, orderId: null, name: "Potassium", value: "4.1", unit: "mmol/L", referenceRange: "3.5-5.0", flag: "normal", resultedAt: minsAgo(48), verifiedBy: "Lab Technologist Salma N." },
+  ];
+
+  const immunizations: ImmunizationRecord[] = [
+    { id: "demo-imm-1", patientId, encounterId: null, vaccine: "Tetanus (Td/Tdap)", dose: "Booster", date: "2021-09-12", site: "Left deltoid", lot: "TD-4471", provider: "Community clinic", status: "administered", createdAt: daysAgo(1000) },
+    { id: "demo-imm-2", patientId, encounterId: null, vaccine: "Influenza", dose: "Seasonal", date: "2024-10-03", site: "Right deltoid", lot: "FLU-2210", provider: "Dr. Nadim Aoun", status: "administered", createdAt: daysAgo(280) },
+  ];
+
+  const procedures: ProcedureRecord[] = [
+    { id: "demo-proc-1", encounterId, patientId, name: "IV cannulation", category: "Vascular access", performedAt: minsAgo(72), operator: "Nurse Karim Haddad", site: "Right antecubital fossa", outcome: "18G IV placed, patent", notes: null, createdAt: minsAgo(72) },
+  ];
+
+  const programs: ProgramRecord[] = [
+    { id: "demo-prog-1", patientId, encounterId: null, name: "Hypertension follow-up", type: "chronic-care", enrolledAt: daysAgo(380), status: "active", coordinator: "Dr. Lina Khoury", notes: "Quarterly review", createdAt: daysAgo(380) },
+  ];
+
+  const billingItems: BillingItem[] = [
+    { id: "demo-bill-1", encounterId, patientId, code: "ER-CONS", description: "Emergency consultation", category: "Consultation", amount: 120, status: "billed", createdAt: minsAgo(80) },
+    { id: "demo-bill-2", encounterId, patientId, code: "IMG-CXR", description: "Chest radiograph", category: "Imaging", amount: 80, status: "pending", createdAt: minsAgo(77) },
+    { id: "demo-bill-3", encounterId, patientId, code: "LAB-CMP", description: "Comprehensive metabolic panel", category: "Laboratory", amount: 45, status: "pending", createdAt: minsAgo(79) },
+  ];
+
+  const attachments: Attachment[] = [
+    { id: "demo-att-1", encounterId, patientId, title: "ECG tracing", category: "imaging", fileName: "ecg-12lead.pdf", mimeType: "application/pdf", blob: null, uploadedAt: minsAgo(70), uploadedBy: "Dr. Lina Khoury" },
+    { id: "demo-att-2", encounterId, patientId, title: "Insurance card", category: "document", fileName: "insurance.jpg", mimeType: "image/jpeg", blob: null, uploadedAt: minsAgo(85), uploadedBy: "Registrar Hala" },
+  ];
+
+  await db.transaction(
+    "rw",
+    [db.medications, db.allergyRecords, db.conditions, db.orderRecords, db.resultRecords, db.immunizations, db.procedures, db.programs, db.billingItems, db.attachments],
+    async () => {
+      await db.medications.bulkPut(medications);
+      await db.allergyRecords.bulkPut(allergyRecords);
+      await db.conditions.bulkPut(conditions);
+      await db.orderRecords.bulkPut(orderRecords);
+      await db.resultRecords.bulkPut(resultRecords);
+      await db.immunizations.bulkPut(immunizations);
+      await db.procedures.bulkPut(procedures);
+      await db.programs.bulkPut(programs);
+      await db.billingItems.bulkPut(billingItems);
+      await db.attachments.bulkPut(attachments);
+    },
+  );
+}
+
+async function ensureRegistrationProfileSeed() {
+  const patientId = "mock-master-maya-haddad";
+  const encounterId = "mock-master-maya-haddad-encounter";
+  const existing = await db.patients.get(patientId);
+  const now = Date.now();
+  const arrivedAt = now - 2 * 60 * 60 * 1000;
+
+  const patient: Patient = {
+    id: patientId,
+    displayNumber: "#MOCK-REG-001",
+    mrn: "MRN-2026-000174",
+    patientType: "standard",
+    confidentialityLevel: "normal",
+    title: "Ms.",
+    secondaryMrn: null,
+    name: "Maya Nabil Haddad",
+    firstNameEn: "Maya",
+    middleNameEn: "Nabil",
+    lastNameEn: "Haddad",
+    fourthNameEn: null,
+    firstNameAr: "Maya",
+    middleNameAr: "Nabil",
+    lastNameAr: "Haddad",
+    fourthNameAr: null,
+    motherNameEn: "Rima Khoury",
+    motherNameAr: "Rima Khoury",
+    maidenName: null,
+    spouseNameEn: "Karim Nassar",
+    spouseNameAr: "Karim Nassar",
+    dateOfBirth: "1990-04-18",
+    ageValue: 36,
+    ageUnit: "years",
+    ageCalculated: true,
+    sex: "female",
+    sexAtBirth: "female",
+    genderIdentity: null,
+    phone: "+961 71 555 284",
+    mobileSecondary: "+961 76 555 917",
+    homePhone: "+961 1 555 462",
+    workPhone: "+961 1 555 833",
+    fax: null,
+    preferredContactMethod: "mobile",
+    mayReceiveSms: true,
+    mayReceiveEmail: true,
+    communicationNotes: "Mock development patient only.",
+    nationalId: "MOCK-LB-784512",
+    email: "maya.haddad@example.test",
+    address: "Lebanon | Beirut | Beirut | Beirut | Mock Cedar Street | Cedar Building",
+    addressCountry: "Lebanon",
+    addressGovernorate: "Beirut",
+    addressDistrict: "Beirut",
+    addressCity: "Beirut",
+    addressVillage: null,
+    addressZone: "Achrafieh",
+    addressArea: "Sassine",
+    addressStreet: "Mock Cedar Street",
+    addressBuilding: "Cedar Building",
+    addressFloor: "4",
+    addressAdditionalDetails: "Opposite the public garden",
+    placeOfBirthCountry: "Lebanon",
+    placeOfBirthGovernorate: "Beirut",
+    placeOfBirthDistrict: "Beirut",
+    placeOfBirthCity: "Beirut",
+    placeOfBirthVillage: null,
+    placeOfBirthLocality: "Achrafieh",
+    city: "Beirut",
+    nationality: "Lebanese",
+    maritalStatus: "married",
+    preferredLanguage: "Arabic",
+    emergencyContact: "Rima Khoury Haddad | mother | +961 70 555 121",
+    emergencyContactName: "Rima Khoury Haddad",
+    emergencyContactRelationship: "mother",
+    emergencyContactPhone: "+961 70 555 121",
+    insurance: "Cedar Health Plan | CHP-784512",
+    insuranceProvider: "Cedar Health Plan",
+    insurancePolicyNumber: "POL-MOCK-2026-147",
+    defaultInsuranceId: "mock-ins-maya-default",
+    bloodGroup: "O+",
+    vip: false,
+    deceased: false,
+    deceasedDate: null,
+    religion: null,
+    representativeGuardianName: null,
+    knownConditions: [],
+    currentMedications: [],
+    photoBlob: null,
+    identityStatus: "confirmed",
+    estimatedAgeRange: null,
+    registrationComplete: true,
+    duplicateOverride: false,
+    catastropheTags: [],
+    mergedIntoPatientId: null,
+    mergedAt: null,
+    mergeUndoneAt: null,
+    createdAt: arrivedAt,
+  };
+
+  const encounter: Encounter = {
+    id: encounterId,
+    caseNumber: "ER-2026-MOCK-0174",
+    patientId,
+    incidentId: null,
+    modeAtCreation: "normal",
+    pathway: "standard",
+    arrivedAt,
+    state: "registered",
+    disposition: null,
+    closedAt: null,
+    chiefComplaint: "Mock registration profile review",
+    arrivalMethod: "walk_in",
+    referralSource: "Development seed",
+    allergies: [],
+    currentLocationName: null,
+    currentZone: null,
+    currentProvider: null,
+    updatedAt: now,
+  };
+
+  const identifiers: PatientIdentifier[] = [
+    { id: "mock-id-maya-mrn", patientId, type: "mrn", value: "MRN-2026-000174", issuingCountry: "Lebanon", issueDate: "2026-01-01", expiryDate: null, isPrimary: true, verificationStatus: "verified", verifiedBy: "Development seed", verificationDate: "2026-01-01", frontImageBlob: null, backImageBlob: null, notes: "Mock MRN", createdAt: arrivedAt },
+    { id: "mock-id-maya-national", patientId, type: "national_id", value: "MOCK-LB-784512", issuingCountry: "Lebanon", issueDate: null, expiryDate: null, isPrimary: true, verificationStatus: "verified", verifiedBy: "Development seed", verificationDate: "2026-01-01", frontImageBlob: null, backImageBlob: null, notes: "Fictional national ID", createdAt: arrivedAt },
+    { id: "mock-id-maya-passport", patientId, type: "passport", value: "P-MOCK-458721", issuingCountry: "Lebanon", issueDate: null, expiryDate: "2030-08-10", isPrimary: false, verificationStatus: "verified", verifiedBy: "Development seed", verificationDate: "2026-01-01", frontImageBlob: null, backImageBlob: null, notes: "Fictional passport", createdAt: arrivedAt },
+  ];
+
+  const relatedPersons: RelatedPerson[] = [
+    { id: "mock-rel-maya-mother", patientId, fullName: "Rima Khoury Haddad", englishName: "Rima Khoury Haddad", arabicName: null, relationship: "mother", mobilePrimary: "+961 70 555 121", mobileSecondary: null, email: null, address: "Beirut, Lebanon", nationalId: null, isEmergencyContact: true, isNextOfKin: true, isSpouse: false, isParent: true, isLegalGuardian: false, isAuthorizedRepresentative: false, preferredContactMethod: "mobile", contactPriority: 1, notes: "Mock next of kin", createdAt: arrivedAt, updatedAt: now },
+    { id: "mock-rel-maya-spouse", patientId, fullName: "Karim Nassar", englishName: "Karim Nassar", arabicName: null, relationship: "spouse", mobilePrimary: "+961 71 555 882", mobileSecondary: null, email: null, address: null, nationalId: null, isEmergencyContact: true, isNextOfKin: false, isSpouse: true, isParent: false, isLegalGuardian: false, isAuthorizedRepresentative: false, preferredContactMethod: "mobile", contactPriority: 2, notes: "Mock spouse", createdAt: arrivedAt, updatedAt: now },
+    { id: "mock-rel-maya-reference", patientId, fullName: "Nabil Haddad", englishName: "Nabil Haddad", arabicName: null, relationship: "father", mobilePrimary: "+961 76 555 330", mobileSecondary: null, email: null, address: null, nationalId: null, isEmergencyContact: false, isNextOfKin: false, isSpouse: false, isParent: true, isLegalGuardian: false, isAuthorizedRepresentative: false, preferredContactMethod: "mobile", contactPriority: 3, notes: "Mock secondary reference", createdAt: arrivedAt, updatedAt: now },
+  ];
+
+  const insurance: InsurancePolicy = {
+    id: "mock-ins-maya-default",
+    patientId,
+    payerId: "INS-MOCK-001",
+    payerName: "Cedar Health Plan",
+    plan: null,
+    membershipNumber: "CHP-784512",
+    policyNumber: "POL-MOCK-2026-147",
+    coverageClass: null,
+    subscriberRelationship: null,
+    subscriberName: null,
+    subscriberId: null,
+    effectiveDate: null,
+    expiryDate: "2027-12-31",
+    isDefault: true,
+    approvalRequired: false,
+    notes: "Mock development insurance policy.",
+    cardImageBlob: null,
+    createdAt: arrivedAt,
+    updatedAt: now,
+  };
+
+  const registry: CivilRegistryRecord = {
+    id: "mock-civil-maya",
+    patientId,
+    sijilNumber: "214",
+    sahifaNumber: "88",
+    daira: "Achrafieh",
+    registryCountry: "Lebanon",
+    registryGovernorate: "Beirut",
+    registryDistrict: "Beirut",
+    registryLocality: "Achrafieh",
+    registryNotes: "Mock civil registry data.",
+    updatedAt: now,
+  };
+
+  const employment: EmploymentRecord = {
+    id: "mock-employment-maya",
+    patientId,
+    occupation: "Software Engineer",
+    employmentStatus: "employed",
+    employer: "Cedar Systems SAL",
+    jobTitle: null,
+    workPhone: "+961 1 555 833",
+    workAddress: "Beirut Digital District",
+    industry: "Technology",
+    notes: "Mock employment data.",
+    updatedAt: now,
+  };
+
+  const military: MilitaryRecord = {
+    id: "mock-military-maya",
+    patientId,
+    enabled: false,
+    institution: null,
+    section: null,
+    positionOrRank: null,
+    serviceNumber: null,
+    zone: null,
+    notes: null,
+    updatedAt: now,
+  };
+
+  const pendingCases: PendingCase[] = [
+    { id: "mock-pending-maya-insurance", patientId, encounterId, caseNumber: "ER-2026-MOCK-0174", requestNumber: "REQ-MOCK-INS-001", requestDate: now - 50 * 60 * 1000, requestType: "Insurance review", pendingStatus: "pending_insurance", responsibleDepartment: "Billing", assignedOwner: "Mock Registrar", createdAt: now - 50 * 60 * 1000 },
+    { id: "mock-pending-maya-documentation", patientId, encounterId, caseNumber: "ER-2026-MOCK-0174", requestNumber: "REQ-MOCK-DOC-002", requestDate: now - 35 * 60 * 1000, requestType: "Document verification", pendingStatus: "pending_documentation", responsibleDepartment: "Registration", assignedOwner: "Mock Registration Desk", createdAt: now - 35 * 60 * 1000 },
+  ];
+
+  await db.transaction(
+    "rw",
+    [db.patients, db.encounters, db.patientIdentifiers, db.relatedPersons, db.insurancePolicies, db.civilRegistryRecords, db.employmentRecords, db.militaryRecords, db.pendingCases, db.clinicalEvents],
+    async () => {
+      await db.patients.put(patient);
+      if (!existing) {
+        await db.encounters.put(encounter);
+        await db.clinicalEvents.put({ id: "mock-master-maya-created", encounterId, type: "created", content: { mock: true, message: "Fictional registration profile development patient" }, attachmentBlob: null, recordedAt: arrivedAt });
+      }
+      await db.patientIdentifiers.bulkPut(identifiers);
+      await db.relatedPersons.bulkPut(relatedPersons);
+      await db.insurancePolicies.put(insurance);
+      await db.civilRegistryRecords.put(registry);
+      await db.employmentRecords.put(employment);
+      await db.militaryRecords.put(military);
+      await db.pendingCases.bulkPut(pendingCases);
+    },
+  );
 }
 
 function patientSeed(

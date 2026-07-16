@@ -2,6 +2,14 @@ import { db } from "./db";
 import { uuid, nextCaseNumber, nextDisplayNumber, nextMrn } from "./ids";
 import { writeAudit } from "./audit";
 import { calculateBmi, implausibleFields, scoreNews2 } from "../lib/vitals";
+import { canTransitionOrderStatus, resultReviewStatus } from "../lib/clinicalWorkflow";
+import {
+  assertEncounterTransition,
+  legacyStateForWorkflowStatus,
+  workflowStatusForEncounter,
+  workflowStatusFromLegacy,
+} from "../domain/encounterStateMachine";
+import { resolvePrototypeActor } from "../domain/prototypeUser";
 import type {
   AgeBand,
   Avpu,
@@ -12,10 +20,28 @@ import type {
   TriageAlgorithm,
   ClinicalEventType,
   EncounterState,
+  EncounterStatus,
   Disposition,
   OrderStatus,
   OrderType,
   VitalsSet,
+  PatientIdentifier,
+  RelatedPerson,
+  InsurancePolicy,
+  CivilRegistryRecord,
+  EmploymentRecord,
+  MilitaryRecord,
+  PendingCase,
+  MedicationRecord,
+  AllergyRecord,
+  ConditionRecord,
+  OrderRecord,
+  ResultRecord,
+  ImmunizationRecord,
+  ProcedureRecord,
+  ProgramRecord,
+  BillingItem,
+  Attachment,
 } from "../types";
 
 export interface PatientWithEncounter {
@@ -33,24 +59,50 @@ export async function transitionEncounterState(
     mode: Mode;
     device?: string | null;
     source?: "online" | "offline" | "local";
+    workflowStatus?: EncounterStatus;
+    enforceWorkflow?: boolean;
+    metadata?: Record<string, unknown>;
   },
 ) {
   const encounter = await db.encounters.get(encounterId);
-  const previousState = encounter?.state ?? null;
-  if (!encounter || previousState === newState) return;
+  if (!encounter) {
+    if (params.enforceWorkflow) throw new Error("Encounter not found.");
+    return;
+  }
+
+  const previousState = encounter.state;
+  const previousWorkflowStatus = workflowStatusForEncounter(encounter);
+  const nextWorkflowStatus = params.workflowStatus ?? workflowStatusFromLegacy(newState, encounter.disposition);
+  if (params.enforceWorkflow && previousWorkflowStatus !== nextWorkflowStatus) {
+    assertEncounterTransition(previousWorkflowStatus, nextWorkflowStatus);
+  }
+  if (previousState === newState && previousWorkflowStatus === nextWorkflowStatus) return encounter;
+
   const now = Date.now();
+  const occurredAt = new Date(now).toISOString();
+  const actor = resolvePrototypeActor(params.actor);
   await db.transaction("rw", db.encounters, db.stateTransitions, db.clinicalEvents, async () => {
-    await db.encounters.update(encounterId, { state: newState, updatedAt: now });
+    await db.encounters.update(encounterId, {
+      state: newState,
+      workflowStatus: nextWorkflowStatus,
+      updatedAt: now,
+    });
     await db.stateTransitions.add({
       id: uuid(),
       encounterId,
       previousState,
       newState,
       reason: params.reason ?? null,
-      actor: params.actor ?? null,
+      actor: actor.actorName,
       device: params.device ?? "local browser",
       source: params.source ?? "local",
       timestamp: now,
+      workflowFromStatus: previousWorkflowStatus,
+      workflowToStatus: nextWorkflowStatus,
+      actorId: actor.actorId,
+      actorName: actor.actorName,
+      occurredAt,
+      metadata: params.metadata,
     });
     await db.clinicalEvents.add({
       id: uuid(),
@@ -59,8 +111,13 @@ export async function transitionEncounterState(
       content: {
         previousState,
         newState,
+        fromStatus: previousWorkflowStatus,
+        toStatus: nextWorkflowStatus,
         reason: params.reason ?? null,
-        actor: params.actor ?? null,
+        actorId: actor.actorId,
+        actorName: actor.actorName,
+        occurredAt,
+        metadata: params.metadata,
       },
       attachmentBlob: null,
       recordedAt: now,
@@ -72,8 +129,38 @@ export async function transitionEncounterState(
     action: "state_transition",
     previousValue: previousState,
     newValue: newState,
-    actor: params.actor ?? null,
+    actor: actor.actorName,
+    actorId: actor.actorId,
+    demoRole: actor.demoRole,
+    encounterId,
+    patientId: encounter.patientId,
+    reason: params.reason ?? null,
+    metadata: {
+      fromStatus: previousWorkflowStatus,
+      toStatus: nextWorkflowStatus,
+      ...params.metadata,
+    },
     mode: params.mode,
+  });
+  return { ...encounter, state: newState, workflowStatus: nextWorkflowStatus, updatedAt: now };
+}
+
+export async function transitionEncounterWorkflowStatus(
+  encounterId: string,
+  toStatus: EncounterStatus,
+  params: {
+    reason?: string | null;
+    actor?: string | null;
+    mode: Mode;
+    device?: string | null;
+    source?: "online" | "offline" | "local";
+    metadata?: Record<string, unknown>;
+  },
+) {
+  return transitionEncounterState(encounterId, legacyStateForWorkflowStatus(toStatus), {
+    ...params,
+    workflowStatus: toStatus,
+    enforceWorkflow: true,
   });
 }
 
@@ -97,9 +184,12 @@ export async function createQuickRegistration(input: QuickRegistrationInput) {
     id: patientId,
     displayNumber,
     mrn,
+    patientType: input.name.trim() ? "standard" : "unknown",
+    confidentialityLevel: "normal",
     name: input.name.trim() || null,
     dateOfBirth: input.dob || null,
     sex: input.sex ?? "unknown",
+    sexAtBirth: input.sex ?? "unknown",
     phone: null,
     photoBlob: null,
     identityStatus: input.name.trim() ? "provisional" : "unknown",
@@ -110,6 +200,7 @@ export async function createQuickRegistration(input: QuickRegistrationInput) {
     mergedIntoPatientId: null,
     mergedAt: null,
     mergeUndoneAt: null,
+    isSynthetic: true,
     createdAt: now,
   };
   const encounter: Encounter = {
@@ -121,6 +212,7 @@ export async function createQuickRegistration(input: QuickRegistrationInput) {
     pathway: "standard",
     arrivedAt: now,
     state: "registered",
+    workflowStatus: "ARRIVED",
     disposition: null,
     closedAt: null,
     chiefComplaint: input.chiefComplaint.trim() || null,
@@ -132,6 +224,7 @@ export async function createQuickRegistration(input: QuickRegistrationInput) {
     currentProvider: null,
     updatedAt: now,
   };
+  const createdActor = resolvePrototypeActor("Registrar");
   await db.transaction("rw", db.patients, db.encounters, db.patientIdentifiers, db.clinicalEvents, db.stateTransitions, async () => {
     await db.patients.add(patient);
     await db.patientIdentifiers.add({ id: uuid(), patientId, type: "mrn", value: mrn, createdAt: now });
@@ -150,10 +243,15 @@ export async function createQuickRegistration(input: QuickRegistrationInput) {
       previousState: null,
       newState: "registered",
       reason: "Quick registration",
-      actor: "Registrar",
+      actor: createdActor.actorName,
       device: "local browser",
       source: "local",
       timestamp: now,
+      workflowFromStatus: null,
+      workflowToStatus: "ARRIVED",
+      actorId: createdActor.actorId,
+      actorName: createdActor.actorName,
+      occurredAt: new Date(now).toISOString(),
     });
   });
   await writeAudit({
@@ -188,6 +286,7 @@ export async function createEncounterForExistingPatient(patient: Patient, chiefC
     pathway: "standard",
     arrivedAt: now,
     state: "registered",
+    workflowStatus: "ARRIVED",
     disposition: null,
     closedAt: null,
     chiefComplaint: chiefComplaint || null,
@@ -199,6 +298,7 @@ export async function createEncounterForExistingPatient(patient: Patient, chiefC
     currentProvider: null,
     updatedAt: now,
   };
+  const createdActor = resolvePrototypeActor("Registrar");
   await db.transaction("rw", db.encounters, db.clinicalEvents, db.stateTransitions, async () => {
     await db.encounters.add(encounter);
     await db.clinicalEvents.add({
@@ -215,10 +315,15 @@ export async function createEncounterForExistingPatient(patient: Patient, chiefC
       previousState: null,
       newState: "registered",
       reason: "Returning patient encounter created",
-      actor: "Registrar",
+      actor: createdActor.actorName,
       device: "local browser",
       source: "local",
       timestamp: now,
+      workflowFromStatus: null,
+      workflowToStatus: "ARRIVED",
+      actorId: createdActor.actorId,
+      actorName: createdActor.actorName,
+      occurredAt: new Date(now).toISOString(),
     });
   });
   await writeAudit({
@@ -488,6 +593,7 @@ export async function createCatastrophePatient(incidentId: string | null) {
     photoBlob: null,
     identityStatus: "unknown",
     estimatedAgeRange: null,
+    isSynthetic: true,
     createdAt: now,
   };
 
@@ -500,6 +606,7 @@ export async function createCatastrophePatient(incidentId: string | null) {
     pathway: "catastrophe",
     arrivedAt: now,
     state: "arrived",
+    workflowStatus: "ARRIVED",
     disposition: null,
     closedAt: null,
     chiefComplaint: null,
@@ -509,6 +616,7 @@ export async function createCatastrophePatient(incidentId: string | null) {
     currentProvider: null,
     updatedAt: now,
   };
+  const createdActor = resolvePrototypeActor("Incident team");
 
   await db.transaction("rw", db.patients, db.encounters, db.clinicalEvents, db.stateTransitions, async () => {
     await db.patients.add(patient);
@@ -527,10 +635,15 @@ export async function createCatastrophePatient(incidentId: string | null) {
       previousState: null,
       newState: "arrived",
       reason: "Catastrophe tag created",
-      actor: "Incident team",
+      actor: createdActor.actorName,
       device: "local browser",
       source: "local",
       timestamp: now,
+      workflowFromStatus: null,
+      workflowToStatus: "ARRIVED",
+      actorId: createdActor.actorId,
+      actorName: createdActor.actorName,
+      occurredAt: new Date(now).toISOString(),
     });
   });
   await writeAudit({
@@ -555,13 +668,17 @@ export async function createCriticalPatient() {
     id: patientId,
     displayNumber,
     mrn,
+    patientType: "unknown",
+    confidentialityLevel: "normal",
     name: null,
     dateOfBirth: null,
     sex: "unknown",
+    sexAtBirth: "unknown",
     phone: null,
     photoBlob: null,
     identityStatus: "provisional",
     estimatedAgeRange: null,
+    isSynthetic: true,
     createdAt: now,
   };
   const encounter: Encounter = {
@@ -573,6 +690,7 @@ export async function createCriticalPatient() {
     pathway: "critical",
     arrivedAt: now,
     state: "resuscitation",
+    workflowStatus: "ROOMED",
     disposition: null,
     closedAt: null,
     chiefComplaint: "Critical patient - immediate treatment",
@@ -582,6 +700,7 @@ export async function createCriticalPatient() {
     currentProvider: null,
     updatedAt: now,
   };
+  const createdActor = resolvePrototypeActor("Triage nurse");
   await db.transaction("rw", db.patients, db.encounters, db.clinicalEvents, db.stateTransitions, async () => {
     await db.patients.add(patient);
     await db.encounters.add(encounter);
@@ -599,10 +718,15 @@ export async function createCriticalPatient() {
       previousState: null,
       newState: "resuscitation",
       reason: "Immediate danger - direct to resuscitation",
-      actor: "Triage nurse",
+      actor: createdActor.actorName,
       device: "local browser",
       source: "local",
       timestamp: now,
+      workflowFromStatus: null,
+      workflowToStatus: "ROOMED",
+      actorId: createdActor.actorId,
+      actorName: createdActor.actorName,
+      occurredAt: new Date(now).toISOString(),
     });
   });
   await setTriage(encounterId, "esi", 1, "normal", "Immediate danger - registration deferred");
@@ -1087,6 +1211,200 @@ export async function updatePatientField(
   });
 }
 
+export async function addPatientIdentifier(
+  input: Omit<PatientIdentifier, "id" | "createdAt"> & { createdAt?: number },
+  mode: Mode,
+) {
+  const now = Date.now();
+  const row: PatientIdentifier = {
+    ...input,
+    id: uuid(),
+    createdAt: input.createdAt ?? now,
+    verificationStatus: input.verificationStatus ?? "unverified",
+  };
+  const existingSamePatient = await db.patientIdentifiers
+    .where("patientId")
+    .equals(row.patientId)
+    .filter((candidate) => candidate.type === row.type && candidate.value === row.value)
+    .first();
+  if (existingSamePatient) return existingSamePatient;
+  const duplicate = await db.patientIdentifiers
+    .where("value")
+    .equals(row.value)
+    .filter((candidate) => candidate.patientId !== row.patientId && candidate.type === row.type)
+    .first();
+  if (duplicate) throw new Error("Identifier already belongs to another patient.");
+  if (row.isPrimary) {
+    const existing = await db.patientIdentifiers.where("patientId").equals(row.patientId).toArray();
+    await Promise.all(existing.filter((candidate) => candidate.type === row.type).map((candidate) => db.patientIdentifiers.update(candidate.id, { isPrimary: false })));
+  }
+  await db.patientIdentifiers.add(row);
+  await writeAudit({ entityType: "patient_identifier", entityId: row.id, action: "identifier_added", newValue: `${row.type}:${row.value}`, mode });
+  return row;
+}
+
+export async function updatePatientIdentifier(id: string, updates: Partial<PatientIdentifier>, mode: Mode) {
+  const existing = await db.patientIdentifiers.get(id);
+  if (!existing) return;
+  if (updates.value && updates.value !== existing.value) {
+    const duplicate = await db.patientIdentifiers
+      .where("value")
+      .equals(updates.value)
+      .filter((candidate) => candidate.patientId !== existing.patientId && candidate.type === (updates.type ?? existing.type))
+      .first();
+    if (duplicate) throw new Error("Identifier already belongs to another patient.");
+  }
+  if (updates.isPrimary) {
+    const rows = await db.patientIdentifiers.where("patientId").equals(existing.patientId).toArray();
+    await Promise.all(rows.filter((candidate) => candidate.id !== id && candidate.type === (updates.type ?? existing.type)).map((candidate) => db.patientIdentifiers.update(candidate.id, { isPrimary: false })));
+  }
+  await db.patientIdentifiers.update(id, updates);
+  await writeAudit({ entityType: "patient_identifier", entityId: id, action: "identifier_updated", previousValue: existing.value, newValue: updates.value ?? existing.value, mode });
+}
+
+export async function removePatientIdentifier(id: string, mode: Mode) {
+  const row = await db.patientIdentifiers.get(id);
+  await db.patientIdentifiers.delete(id);
+  await writeAudit({ entityType: "patient_identifier", entityId: id, action: "identifier_removed", previousValue: row?.value ?? null, mode });
+}
+
+export async function addRelatedPerson(input: Omit<RelatedPerson, "id" | "createdAt" | "updatedAt">, mode: Mode) {
+  const now = Date.now();
+  const row: RelatedPerson = { ...input, id: uuid(), createdAt: now, updatedAt: now };
+  await db.relatedPersons.add(row);
+  await writeAudit({ entityType: "related_person", entityId: row.id, action: "related_person_added", newValue: row.fullName, mode });
+  return row;
+}
+
+export async function updateRelatedPerson(id: string, updates: Partial<RelatedPerson>, mode: Mode) {
+  await db.relatedPersons.update(id, { ...updates, updatedAt: Date.now() });
+  await writeAudit({ entityType: "related_person", entityId: id, action: "related_person_updated", newValue: updates.fullName ?? null, mode });
+}
+
+export async function removeRelatedPerson(id: string, mode: Mode) {
+  const row = await db.relatedPersons.get(id);
+  await db.relatedPersons.delete(id);
+  await writeAudit({ entityType: "related_person", entityId: id, action: "related_person_removed", previousValue: row?.fullName ?? null, mode });
+}
+
+export async function addInsurancePolicy(input: Omit<InsurancePolicy, "id" | "createdAt" | "updatedAt">, mode: Mode) {
+  const now = Date.now();
+  const row: InsurancePolicy = { ...input, id: uuid(), createdAt: now, updatedAt: now };
+  if (row.isDefault) {
+    const existing = await db.insurancePolicies.where("patientId").equals(row.patientId).toArray();
+    await Promise.all(existing.map((policy) => db.insurancePolicies.update(policy.id, { isDefault: false })));
+    await db.patients.update(row.patientId, { defaultInsuranceId: row.id, insuranceProvider: row.payerName, insurancePolicyNumber: row.policyNumber ?? row.membershipNumber ?? null });
+  }
+  await db.insurancePolicies.add(row);
+  await writeAudit({ entityType: "insurance_policy", entityId: row.id, action: "insurance_added", newValue: row.payerName, mode });
+  return row;
+}
+
+export async function updateInsurancePolicy(id: string, updates: Partial<InsurancePolicy>, mode: Mode) {
+  const existing = await db.insurancePolicies.get(id);
+  if (!existing) return;
+  const next = { ...updates, updatedAt: Date.now() };
+  if (updates.isDefault) {
+    const rows = await db.insurancePolicies.where("patientId").equals(existing.patientId).toArray();
+    await Promise.all(rows.filter((policy) => policy.id !== id).map((policy) => db.insurancePolicies.update(policy.id, { isDefault: false })));
+    await db.patients.update(existing.patientId, {
+      defaultInsuranceId: id,
+      insuranceProvider: updates.payerName ?? existing.payerName,
+      insurancePolicyNumber: updates.policyNumber ?? updates.membershipNumber ?? existing.policyNumber ?? existing.membershipNumber ?? null,
+    });
+  }
+  await db.insurancePolicies.update(id, next);
+  await writeAudit({ entityType: "insurance_policy", entityId: id, action: "insurance_updated", newValue: updates.payerName ?? updates.policyNumber ?? null, mode });
+}
+
+export async function removeInsurancePolicy(id: string, mode: Mode) {
+  const row = await db.insurancePolicies.get(id);
+  await db.insurancePolicies.delete(id);
+  if (row?.isDefault) await db.patients.update(row.patientId, { defaultInsuranceId: null });
+  await writeAudit({ entityType: "insurance_policy", entityId: id, action: "insurance_removed", previousValue: row?.payerName ?? null, mode });
+}
+
+export async function upsertCivilRegistryRecord(patientId: string, updates: Partial<CivilRegistryRecord>, mode: Mode) {
+  const existing = await db.civilRegistryRecords.where("patientId").equals(patientId).first();
+  if (existing) {
+    await db.civilRegistryRecords.update(existing.id, { ...updates, updatedAt: Date.now() });
+    await writeAudit({ entityType: "civil_registry", entityId: existing.id, action: "civil_registry_updated", newValue: updates.sijilNumber ?? updates.daira ?? null, mode });
+    return existing.id;
+  }
+  const row: CivilRegistryRecord = {
+    id: uuid(),
+    patientId,
+    sijilNumber: updates.sijilNumber ?? null,
+    sahifaNumber: updates.sahifaNumber ?? null,
+    daira: updates.daira ?? null,
+    registryCountry: updates.registryCountry ?? null,
+    registryGovernorate: updates.registryGovernorate ?? null,
+    registryDistrict: updates.registryDistrict ?? null,
+    registryLocality: updates.registryLocality ?? null,
+    registryNotes: updates.registryNotes ?? null,
+    updatedAt: Date.now(),
+  };
+  await db.civilRegistryRecords.add(row);
+  await writeAudit({ entityType: "civil_registry", entityId: row.id, action: "civil_registry_created", newValue: row.sijilNumber ?? row.daira, mode });
+  return row.id;
+}
+
+export async function upsertEmploymentRecord(patientId: string, updates: Partial<EmploymentRecord>, mode: Mode) {
+  const existing = await db.employmentRecords.where("patientId").equals(patientId).first();
+  if (existing) {
+    await db.employmentRecords.update(existing.id, { ...updates, updatedAt: Date.now() });
+    await writeAudit({ entityType: "employment", entityId: existing.id, action: "employment_updated", newValue: updates.occupation ?? updates.employer ?? null, mode });
+    return existing.id;
+  }
+  const row: EmploymentRecord = {
+    id: uuid(),
+    patientId,
+    occupation: updates.occupation ?? null,
+    employmentStatus: updates.employmentStatus ?? null,
+    employer: updates.employer ?? null,
+    jobTitle: updates.jobTitle ?? null,
+    workPhone: updates.workPhone ?? null,
+    workAddress: updates.workAddress ?? null,
+    industry: updates.industry ?? null,
+    notes: updates.notes ?? null,
+    updatedAt: Date.now(),
+  };
+  await db.employmentRecords.add(row);
+  await writeAudit({ entityType: "employment", entityId: row.id, action: "employment_created", newValue: row.occupation ?? row.employer, mode });
+  return row.id;
+}
+
+export async function upsertMilitaryRecord(patientId: string, updates: Partial<MilitaryRecord>, mode: Mode) {
+  const existing = await db.militaryRecords.where("patientId").equals(patientId).first();
+  if (existing) {
+    await db.militaryRecords.update(existing.id, { ...updates, updatedAt: Date.now() });
+    await writeAudit({ entityType: "military_record", entityId: existing.id, action: "military_updated", newValue: updates.institution ?? updates.serviceNumber ?? null, mode });
+    return existing.id;
+  }
+  const row: MilitaryRecord = {
+    id: uuid(),
+    patientId,
+    enabled: updates.enabled ?? false,
+    institution: updates.institution ?? null,
+    section: updates.section ?? null,
+    positionOrRank: updates.positionOrRank ?? null,
+    serviceNumber: updates.serviceNumber ?? null,
+    zone: updates.zone ?? null,
+    notes: updates.notes ?? null,
+    updatedAt: Date.now(),
+  };
+  await db.militaryRecords.add(row);
+  await writeAudit({ entityType: "military_record", entityId: row.id, action: "military_created", newValue: row.institution ?? null, mode });
+  return row.id;
+}
+
+export async function addPendingCase(input: Omit<PendingCase, "id" | "createdAt"> & { createdAt?: number }, mode: Mode) {
+  const row: PendingCase = { ...input, id: uuid(), createdAt: input.createdAt ?? Date.now() };
+  await db.pendingCases.add(row);
+  await writeAudit({ entityType: "pending_case", entityId: row.id, action: "pending_case_added", newValue: row.pendingStatus, mode });
+  return row;
+}
+
 export async function updateEncounterField(
   encounterId: string,
   field: keyof Encounter,
@@ -1134,4 +1452,410 @@ export async function removeAllergy(encounterId: string, allergy: string, mode: 
     previousValue: allergy,
     mode,
   });
+}
+
+// --- First-class clinical domain CRUD (Dexie v5) ---------------------------
+// Each domain exposes add/update/remove. Every mutation writes an AuditEvent,
+// mirroring the VitalsSet convention. Allergy records additionally keep the
+// Encounter.allergies string[] in sync so the always-on chart banner + seed
+// keep working.
+
+export async function addMedication(
+  input: Omit<MedicationRecord, "id" | "createdAt">,
+  mode: Mode,
+) {
+  const row: MedicationRecord = { ...input, id: uuid(), createdAt: Date.now() };
+  await db.medications.add(row);
+  await writeAudit({ entityType: "medication_record", entityId: row.id, action: "medication_added", newValue: row.name, actor: row.prescriber, mode });
+  return row;
+}
+
+export async function updateMedication(id: string, updates: Partial<MedicationRecord>, mode: Mode) {
+  await db.medications.update(id, updates);
+  await writeAudit({ entityType: "medication_record", entityId: id, action: "medication_updated", newValue: updates.name ?? null, mode });
+}
+
+export async function removeMedication(id: string, mode: Mode) {
+  const row = await db.medications.get(id);
+  await db.medications.delete(id);
+  await writeAudit({ entityType: "medication_record", entityId: id, action: "medication_removed", previousValue: row?.name ?? null, mode });
+}
+
+export async function addAllergyRecord(
+  input: Omit<AllergyRecord, "id" | "notedAt"> & { notedAt?: number },
+  mode: Mode,
+) {
+  const row: AllergyRecord = { ...input, id: uuid(), notedAt: input.notedAt ?? Date.now() };
+  await db.allergyRecords.add(row);
+  const encounter = await db.encounters.get(row.encounterId);
+  if (encounter && !encounter.allergies.includes(row.substance)) {
+    await db.encounters.update(row.encounterId, { allergies: [...encounter.allergies, row.substance] });
+  }
+  await writeAudit({ entityType: "allergy_record", entityId: row.id, action: "allergy_added", newValue: row.substance, actor: row.actor, mode });
+  return row;
+}
+
+export async function updateAllergyRecord(id: string, updates: Partial<AllergyRecord>, mode: Mode) {
+  const before = await db.allergyRecords.get(id);
+  await db.allergyRecords.update(id, updates);
+  if (before && updates.substance && updates.substance !== before.substance) {
+    const encounter = await db.encounters.get(before.encounterId);
+    if (encounter) {
+      const allergies = encounter.allergies.map((a) => (a === before.substance ? updates.substance! : a));
+      await db.encounters.update(before.encounterId, { allergies });
+    }
+  }
+  await writeAudit({ entityType: "allergy_record", entityId: id, action: "allergy_updated", newValue: updates.substance ?? null, mode });
+}
+
+export async function removeAllergyRecord(id: string, mode: Mode) {
+  const row = await db.allergyRecords.get(id);
+  await db.allergyRecords.delete(id);
+  if (row) {
+    const encounter = await db.encounters.get(row.encounterId);
+    if (encounter) {
+      await db.encounters.update(row.encounterId, { allergies: encounter.allergies.filter((a) => a !== row.substance) });
+    }
+  }
+  await writeAudit({ entityType: "allergy_record", entityId: id, action: "allergy_removed", previousValue: row?.substance ?? null, mode });
+}
+
+export async function addCondition(input: Omit<ConditionRecord, "id" | "createdAt">, mode: Mode) {
+  const row: ConditionRecord = { ...input, id: uuid(), createdAt: Date.now() };
+  await db.conditions.add(row);
+  await writeAudit({ entityType: "condition", entityId: row.id, action: "condition_added", newValue: row.name, mode });
+  return row;
+}
+
+export async function updateCondition(id: string, updates: Partial<ConditionRecord>, mode: Mode) {
+  await db.conditions.update(id, updates);
+  await writeAudit({ entityType: "condition", entityId: id, action: "condition_updated", newValue: updates.name ?? null, mode });
+}
+
+export async function removeCondition(id: string, mode: Mode) {
+  const row = await db.conditions.get(id);
+  await db.conditions.delete(id);
+  await writeAudit({ entityType: "condition", entityId: id, action: "condition_removed", previousValue: row?.name ?? null, mode });
+}
+
+export async function addOrderRecord(
+  input: Omit<OrderRecord, "id" | "orderedAt"> & { orderedAt?: number },
+  mode: Mode,
+) {
+  const orderedAt = input.orderedAt ?? Date.now();
+  const row: OrderRecord = {
+    ...input,
+    id: uuid(),
+    orderedAt,
+    statusUpdatedAt: input.statusUpdatedAt ?? orderedAt,
+    statusUpdatedBy: input.statusUpdatedBy ?? input.actor,
+  };
+  await db.orderRecords.add(row);
+  await writeAudit({ entityType: "order_record", entityId: row.id, action: "order_added", newValue: row.name, actor: row.actor, patientId: row.patientId, encounterId: row.encounterId, mode });
+  return row;
+}
+
+export async function updateOrderRecord(id: string, updates: Partial<OrderRecord>, mode: Mode) {
+  const before = await db.orderRecords.get(id);
+  if (!before) throw new Error("Order not found.");
+  if (updates.status && updates.status !== before.status) {
+    throw new Error("Use the Orders workflow action to change order status.");
+  }
+  await db.orderRecords.update(id, updates);
+  await writeAudit({ entityType: "order_record", entityId: id, action: "order_updated", newValue: updates.name ?? null, actor: updates.actor ?? before.actor, patientId: before.patientId, encounterId: before.encounterId, mode });
+}
+
+export async function transitionOrderRecordStatus(
+  id: string,
+  status: OrderStatus,
+  actor: string,
+  mode: Mode,
+  reason?: string,
+) {
+  const before = await db.orderRecords.get(id);
+  if (!before) throw new Error("Order not found.");
+  if (before.status === status) return before;
+  if (!canTransitionOrderStatus(before.status, status)) {
+    throw new Error(`Order cannot move from ${before.status.replace(/_/g, " ")} to ${status.replace(/_/g, " ")}.`);
+  }
+
+  const now = Date.now();
+  const transitionReason = reason?.trim() || null;
+  if (status === "cancelled" && !transitionReason) {
+    throw new Error("A cancellation reason is required.");
+  }
+  const updates: Partial<OrderRecord> = {
+    status,
+    statusUpdatedAt: now,
+    statusUpdatedBy: actor,
+  };
+  if (status === "cancelled") {
+    updates.cancelledAt = now;
+    updates.cancellationReason = transitionReason;
+  }
+
+  await db.orderRecords.update(id, updates);
+  await writeAudit({
+    entityType: "order_record",
+    entityId: id,
+    action: "order_status_transition",
+    previousValue: before.status,
+    newValue: status,
+    actor,
+    patientId: before.patientId,
+    encounterId: before.encounterId,
+    reason: transitionReason,
+    mode,
+  });
+  return { ...before, ...updates };
+}
+
+export async function removeOrderRecord(id: string, mode: Mode) {
+  const row = await db.orderRecords.get(id);
+  await db.orderRecords.delete(id);
+  await writeAudit({ entityType: "order_record", entityId: id, action: "order_removed", previousValue: row?.name ?? null, mode });
+}
+
+export async function addResultRecord(
+  input: Omit<ResultRecord, "id" | "resultedAt"> & { resultedAt?: number },
+  mode: Mode,
+) {
+  const row: ResultRecord = {
+    ...input,
+    id: uuid(),
+    resultedAt: input.resultedAt ?? Date.now(),
+    status: input.status ?? "final",
+    reviewStatus: input.reviewStatus ?? "unreviewed",
+  };
+  await db.resultRecords.add(row);
+  await writeAudit({ entityType: "result_record", entityId: row.id, action: "result_added", newValue: row.name, actor: row.verifiedBy, patientId: row.patientId, encounterId: row.encounterId, mode });
+  if (row.orderId) {
+    const order = await db.orderRecords.get(row.orderId);
+    if (order?.status === "completed") {
+      await transitionOrderRecordStatus(order.id, "result_available", row.verifiedBy ?? "Results service", mode, "Linked result became available");
+    }
+  }
+  return row;
+}
+
+export async function updateResultRecord(id: string, updates: Partial<ResultRecord>, mode: Mode) {
+  const before = await db.resultRecords.get(id);
+  if (!before) throw new Error("Result not found.");
+  if (updates.reviewStatus && updates.reviewStatus !== resultReviewStatus(before)) {
+    throw new Error("Use an explicit Results workflow action to change review status.");
+  }
+
+  const clinicalContentChanged = ["name", "value", "unit", "referenceRange", "flag", "status"].some(
+    (key) => key in updates && updates[key as keyof ResultRecord] !== before[key as keyof ResultRecord],
+  );
+  const nextFlag = updates.flag ?? before.flag;
+  const safeUpdates: Partial<ResultRecord> = { ...updates };
+  if (clinicalContentChanged && ["reviewed", "acknowledged"].includes(resultReviewStatus(before))) {
+    safeUpdates.reviewStatus = nextFlag === "critical" ? "action_required" : "unreviewed";
+    safeUpdates.reviewedAt = null;
+    safeUpdates.reviewedBy = null;
+    safeUpdates.acknowledgedAt = null;
+    safeUpdates.acknowledgedBy = null;
+    safeUpdates.criticalActionTaken = null;
+  } else if (updates.flag === "critical" && before.flag !== "critical") {
+    safeUpdates.reviewStatus = "action_required";
+  }
+
+  await db.resultRecords.update(id, safeUpdates);
+  await writeAudit({
+    entityType: "result_record",
+    entityId: id,
+    action: clinicalContentChanged ? "result_corrected" : "result_updated",
+    previousValue: before.value,
+    newValue: safeUpdates.value ?? safeUpdates.status ?? safeUpdates.name ?? null,
+    actor: safeUpdates.verifiedBy ?? before.verifiedBy,
+    patientId: before.patientId,
+    encounterId: before.encounterId,
+    reason: clinicalContentChanged && safeUpdates.reviewStatus ? "Clinical content changed; review required again" : null,
+    mode,
+  });
+}
+
+export async function reviewResultRecord(id: string, actor: string, mode: Mode) {
+  const before = await db.resultRecords.get(id);
+  if (!before) throw new Error("Result not found.");
+  if (before.flag === "critical") {
+    throw new Error("Critical results require acknowledgement with the clinical action taken.");
+  }
+  if (resultReviewStatus(before) === "acknowledged" || resultReviewStatus(before) === "reviewed") return before;
+
+  const now = Date.now();
+  const updates: Partial<ResultRecord> = {
+    reviewStatus: "reviewed",
+    reviewedAt: now,
+    reviewedBy: actor,
+  };
+  await db.resultRecords.update(id, updates);
+  await writeAudit({
+    entityType: "result_record",
+    entityId: id,
+    action: "result_reviewed",
+    previousValue: resultReviewStatus(before),
+    newValue: "reviewed",
+    actor,
+    patientId: before.patientId,
+    encounterId: before.encounterId,
+    mode,
+  });
+
+  if (before.orderId) {
+    const order = await db.orderRecords.get(before.orderId);
+    if (order?.status === "completed") {
+      await transitionOrderRecordStatus(order.id, "result_available", actor, mode, "Linked result available");
+      await transitionOrderRecordStatus(order.id, "reviewed", actor, mode, "Linked result reviewed");
+    } else if (order?.status === "result_available") {
+      await transitionOrderRecordStatus(order.id, "reviewed", actor, mode, "Linked result reviewed");
+    }
+  }
+  return { ...before, ...updates };
+}
+
+export async function acknowledgeCriticalResultRecord(
+  id: string,
+  actor: string,
+  actionTaken: string,
+  mode: Mode,
+) {
+  const before = await db.resultRecords.get(id);
+  if (!before) throw new Error("Result not found.");
+  if (before.flag !== "critical") throw new Error("Only critical results require critical acknowledgement.");
+  if (!actionTaken.trim()) throw new Error("Record the clinical action taken before acknowledging this critical result.");
+  if (resultReviewStatus(before) === "acknowledged") return before;
+
+  const now = Date.now();
+  const updates: Partial<ResultRecord> = {
+    reviewStatus: "acknowledged",
+    reviewedAt: before.reviewedAt ?? now,
+    reviewedBy: before.reviewedBy ?? actor,
+    acknowledgedAt: now,
+    acknowledgedBy: actor,
+    criticalActionTaken: actionTaken.trim(),
+  };
+  await db.resultRecords.update(id, updates);
+  await writeAudit({
+    entityType: "result_record",
+    entityId: id,
+    action: "critical_result_acknowledged",
+    previousValue: resultReviewStatus(before),
+    newValue: `acknowledged: ${actionTaken.trim()}`,
+    actor,
+    patientId: before.patientId,
+    encounterId: before.encounterId,
+    reason: actionTaken.trim(),
+    mode,
+  });
+  if (before.orderId) {
+    const order = await db.orderRecords.get(before.orderId);
+    if (order?.status === "completed") {
+      await transitionOrderRecordStatus(order.id, "result_available", actor, mode, "Linked critical result available");
+      await transitionOrderRecordStatus(order.id, "reviewed", actor, mode, "Linked critical result acknowledged");
+    } else if (order?.status === "result_available") {
+      await transitionOrderRecordStatus(order.id, "reviewed", actor, mode, "Linked critical result acknowledged");
+    }
+  }
+  return { ...before, ...updates };
+}
+
+export async function removeResultRecord(id: string, mode: Mode) {
+  const row = await db.resultRecords.get(id);
+  await db.resultRecords.delete(id);
+  await writeAudit({ entityType: "result_record", entityId: id, action: "result_removed", previousValue: row?.name ?? null, mode });
+}
+
+export async function addImmunization(input: Omit<ImmunizationRecord, "id" | "createdAt">, mode: Mode) {
+  const row: ImmunizationRecord = { ...input, id: uuid(), createdAt: Date.now() };
+  await db.immunizations.add(row);
+  await writeAudit({ entityType: "immunization", entityId: row.id, action: "immunization_added", newValue: row.vaccine, actor: row.provider, mode });
+  return row;
+}
+
+export async function updateImmunization(id: string, updates: Partial<ImmunizationRecord>, mode: Mode) {
+  await db.immunizations.update(id, updates);
+  await writeAudit({ entityType: "immunization", entityId: id, action: "immunization_updated", newValue: updates.vaccine ?? null, mode });
+}
+
+export async function removeImmunization(id: string, mode: Mode) {
+  const row = await db.immunizations.get(id);
+  await db.immunizations.delete(id);
+  await writeAudit({ entityType: "immunization", entityId: id, action: "immunization_removed", previousValue: row?.vaccine ?? null, mode });
+}
+
+export async function addProcedure(input: Omit<ProcedureRecord, "id" | "createdAt">, mode: Mode) {
+  const row: ProcedureRecord = { ...input, id: uuid(), createdAt: Date.now() };
+  await db.procedures.add(row);
+  await writeAudit({ entityType: "procedure", entityId: row.id, action: "procedure_added", newValue: row.name, actor: row.operator, mode });
+  return row;
+}
+
+export async function updateProcedure(id: string, updates: Partial<ProcedureRecord>, mode: Mode) {
+  await db.procedures.update(id, updates);
+  await writeAudit({ entityType: "procedure", entityId: id, action: "procedure_updated", newValue: updates.name ?? null, mode });
+}
+
+export async function removeProcedure(id: string, mode: Mode) {
+  const row = await db.procedures.get(id);
+  await db.procedures.delete(id);
+  await writeAudit({ entityType: "procedure", entityId: id, action: "procedure_removed", previousValue: row?.name ?? null, mode });
+}
+
+export async function addProgram(input: Omit<ProgramRecord, "id" | "createdAt">, mode: Mode) {
+  const row: ProgramRecord = { ...input, id: uuid(), createdAt: Date.now() };
+  await db.programs.add(row);
+  await writeAudit({ entityType: "program", entityId: row.id, action: "program_added", newValue: row.name, actor: row.coordinator, mode });
+  return row;
+}
+
+export async function updateProgram(id: string, updates: Partial<ProgramRecord>, mode: Mode) {
+  await db.programs.update(id, updates);
+  await writeAudit({ entityType: "program", entityId: id, action: "program_updated", newValue: updates.name ?? updates.status ?? null, mode });
+}
+
+export async function removeProgram(id: string, mode: Mode) {
+  const row = await db.programs.get(id);
+  await db.programs.delete(id);
+  await writeAudit({ entityType: "program", entityId: id, action: "program_removed", previousValue: row?.name ?? null, mode });
+}
+
+export async function addBillingItem(input: Omit<BillingItem, "id" | "createdAt">, mode: Mode) {
+  const row: BillingItem = { ...input, id: uuid(), createdAt: Date.now() };
+  await db.billingItems.add(row);
+  await writeAudit({ entityType: "billing_item", entityId: row.id, action: "billing_added", newValue: row.description, mode });
+  return row;
+}
+
+export async function updateBillingItem(id: string, updates: Partial<BillingItem>, mode: Mode) {
+  await db.billingItems.update(id, updates);
+  await writeAudit({ entityType: "billing_item", entityId: id, action: "billing_updated", newValue: updates.status ?? updates.description ?? null, mode });
+}
+
+export async function removeBillingItem(id: string, mode: Mode) {
+  const row = await db.billingItems.get(id);
+  await db.billingItems.delete(id);
+  await writeAudit({ entityType: "billing_item", entityId: id, action: "billing_removed", previousValue: row?.description ?? null, mode });
+}
+
+export async function addAttachment(
+  input: Omit<Attachment, "id" | "uploadedAt"> & { uploadedAt?: number },
+  mode: Mode,
+) {
+  const row: Attachment = { ...input, id: uuid(), uploadedAt: input.uploadedAt ?? Date.now() };
+  await db.attachments.add(row);
+  await writeAudit({ entityType: "attachment", entityId: row.id, action: "attachment_added", newValue: row.title, actor: row.uploadedBy, mode });
+  return row;
+}
+
+export async function updateAttachment(id: string, updates: Partial<Attachment>, mode: Mode) {
+  await db.attachments.update(id, updates);
+  await writeAudit({ entityType: "attachment", entityId: id, action: "attachment_updated", newValue: updates.title ?? null, mode });
+}
+
+export async function removeAttachment(id: string, mode: Mode) {
+  const row = await db.attachments.get(id);
+  await db.attachments.delete(id);
+  await writeAudit({ entityType: "attachment", entityId: id, action: "attachment_removed", previousValue: row?.title ?? null, mode });
 }

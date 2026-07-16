@@ -52,7 +52,9 @@ export function MrnImportPanel({
         <div className="min-w-[240px] flex-1">
           <div className="mb-1 flex items-center gap-2">
             <History size={16} className="text-[var(--color-primary)]" />
-            <label htmlFor="mrn-search" className="text-sm font-semibold">Returning patient by MRN</label>
+            <label htmlFor="mrn-search" className="text-sm font-semibold">
+              Returning patient by MRN <span className="text-[var(--color-red-solid)]">*</span>
+            </label>
           </div>
           <div className="flex gap-2">
             <input

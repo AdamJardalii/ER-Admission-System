@@ -40,7 +40,7 @@ export function PatientIdentityModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3" onClick={onClose}>
-      <div className="w-full max-w-[360px] rounded-lg bg-white p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
+      <div className="w-full max-w-[360px] rounded-lg bg-[var(--color-surface)] p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
         <div className="mb-3 flex items-start justify-between gap-3">
           <div>
             <p className="text-xs font-bold uppercase text-[var(--color-primary)]">Patient identity</p>
@@ -90,7 +90,7 @@ function InfoRow({ label, value }: { label: string; value: string }) {
   return (
     <div>
       <div className="text-xs font-bold uppercase text-[var(--color-ink-secondary)]">{label}</div>
-      <div className="truncate font-medium">{value}</div>
+      <div className="font-medium">{value}</div>
     </div>
   );
 }

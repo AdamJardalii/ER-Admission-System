@@ -21,6 +21,7 @@ import {
   updateOrderStatus,
 } from "../../db/repo";
 import { TriageBadge } from "../../components/TriageBadge";
+import { orderOptionsFor, TREATMENT_OPTIONS } from "../../lib/clinicalCatalog";
 import { useAppStore } from "../../store/useAppStore";
 import type {
   ClinicalEvent,
@@ -30,8 +31,8 @@ import type {
 } from "../../types";
 
 const inputClass =
-  "w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-sm outline-none focus:border-[var(--color-primary)]";
-const labelClass = "mb-1 block text-xs font-bold uppercase text-[var(--color-ink-secondary)]";
+  "min-h-10 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-sm outline-none focus:border-[var(--color-primary)]";
+const labelClass = "mb-1 block text-xs font-semibold text-[var(--color-ink-secondary)]";
 
 function actorDefault(provider: string | null | undefined) {
   return provider || "Current clinician";
@@ -77,7 +78,7 @@ export function AssessmentWorkflow({ encounterId }: { encounterId: string }) {
   }
 
   return (
-    <div className="grid grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)] gap-3 max-[920px]:grid-cols-1">
+    <div className="grid grid-cols-[minmax(0,1.15fr)_minmax(280px,0.85fr)] gap-3 max-[980px]:grid-cols-1">
       <section className="card">
         <div className="mb-3 flex items-center gap-2">
           <Stethoscope size={17} className="text-[var(--color-primary)]" />
@@ -86,7 +87,7 @@ export function AssessmentWorkflow({ encounterId }: { encounterId: string }) {
             <p className="text-xs text-[var(--color-ink-secondary)]">Clinical thinking and plan, separate from orders.</p>
           </div>
         </div>
-        <div className="grid grid-cols-2 gap-2 max-[620px]:grid-cols-1">
+        <div className="grid grid-cols-2 gap-2 max-[560px]:grid-cols-1">
           <Field label="Symptoms">
             <textarea className={inputClass} rows={2} value={form.symptoms} onChange={(event) => setForm({ ...form, symptoms: event.target.value })} />
           </Field>
@@ -99,7 +100,7 @@ export function AssessmentWorkflow({ encounterId }: { encounterId: string }) {
           <Field label="Impression / possible diagnoses">
             <textarea className={inputClass} rows={2} value={form.impression} onChange={(event) => setForm({ ...form, impression: event.target.value })} />
           </Field>
-          <Field label="Clinical plan" className="col-span-2 max-[620px]:col-span-1">
+          <Field label="Clinical plan" className="col-span-2 max-[560px]:col-span-1">
             <textarea className={inputClass} rows={2} value={form.plan} onChange={(event) => setForm({ ...form, plan: event.target.value })} />
           </Field>
           <Field label="Recorded by">
@@ -206,9 +207,9 @@ export function OrdersWorkflow({ encounterId }: { encounterId: string }) {
           <FlaskConical size={17} className="text-[var(--color-primary)]" />
           <h2 className="text-sm font-semibold">Place an order</h2>
         </div>
-        <div className="grid grid-cols-[150px_minmax(160px,1fr)_minmax(180px,1.3fr)_110px_170px_auto] items-end gap-2 max-[1050px]:grid-cols-2">
+        <div className="grid grid-cols-[minmax(110px,0.7fr)_minmax(140px,1.2fr)_minmax(140px,1.4fr)_minmax(90px,0.6fr)_minmax(110px,0.8fr)_auto] items-end gap-2 max-[860px]:grid-cols-2">
           <Field label="Type"><select className={inputClass} value={form.orderType} onChange={(event) => setForm({ ...form, orderType: event.target.value as OrderType })}>{ORDER_TYPES.map((type) => <option key={type}>{type}</option>)}</select></Field>
-          <Field label="Order"><input className={inputClass} placeholder="CBC, CT head, oxygen..." value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></Field>
+          <Field label="Order" required><input className={inputClass} list="order-name-options" placeholder="CBC, CT head, oxygen..." value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /><datalist id="order-name-options">{orderOptionsFor(form.orderType).map((option) => <option key={option} value={option} />)}</datalist></Field>
           <Field label="Details"><input className={inputClass} placeholder="Dose, site, clinical question" value={form.details} onChange={(event) => setForm({ ...form, details: event.target.value })} /></Field>
           <Field label="Priority"><select className={inputClass} value={form.priority} onChange={(event) => setForm({ ...form, priority: event.target.value as OrderContent["priority"] })}><option>routine</option><option>urgent</option><option>stat</option></select></Field>
           <Field label="Ordered by"><input className={inputClass} value={form.actor} onChange={(event) => setForm({ ...form, actor: event.target.value })} /></Field>
@@ -244,8 +245,8 @@ export function OrdersWorkflow({ encounterId }: { encounterId: string }) {
                   <span>{content.details || "No additional details"}</span><span>{content.actor}</span><EventTime value={order.recordedAt} />
                 </div>
                 {resultOrderId === order.id && (
-                  <div className="mt-2 grid grid-cols-[minmax(200px,1fr)_170px_auto_auto] items-end gap-2 border-t border-[var(--color-border)] pt-2 max-[760px]:grid-cols-1">
-                    <Field label="Verified result"><input className={inputClass} value={resultText} onChange={(event) => setResultText(event.target.value)} /></Field>
+                  <div className="mt-2 grid grid-cols-[minmax(200px,1fr)_minmax(140px,170px)_auto_auto] items-end gap-2 border-t border-[var(--color-border)] pt-2 max-[720px]:grid-cols-1">
+                    <Field label="Verified result" required><input className={inputClass} value={resultText} onChange={(event) => setResultText(event.target.value)} /></Field>
                     <Field label="Verified by"><input className={inputClass} value={resultActor} onChange={(event) => setResultActor(event.target.value)} /></Field>
                     <label className="flex h-[34px] items-center gap-2 text-xs font-semibold text-[var(--color-red-text)]"><input type="checkbox" checked={critical} onChange={(event) => setCritical(event.target.checked)} /> Critical result</label>
                     <button onClick={() => void saveResult(order.id)} className="h-[34px] rounded-md bg-[var(--color-primary)] px-3 text-sm font-semibold text-white">Save result</button>
@@ -347,7 +348,7 @@ function MedicationAdministrationRow({
           Record administration
         </button>
       ) : (
-        <div className="grid grid-cols-[120px_120px_90px_1fr_1fr_150px_auto] items-end gap-2 max-[980px]:grid-cols-2">
+        <div className="grid grid-cols-[repeat(2,minmax(90px,1fr))_minmax(70px,0.7fr)_minmax(110px,1.2fr)_minmax(110px,1.2fr)_minmax(100px,1fr)_auto] items-end gap-2 max-[980px]:grid-cols-2">
           <Field label="Ordered dose"><input className={inputClass} value={form.prescribedDose} onChange={(event) => setForm({ ...form, prescribedDose: event.target.value })} placeholder="500 mg" /></Field>
           <Field label="Given dose"><input className={inputClass} value={form.administeredDose} onChange={(event) => setForm({ ...form, administeredDose: event.target.value })} placeholder="500 mg" /></Field>
           <Field label="Route"><input className={inputClass} value={form.route} onChange={(event) => setForm({ ...form, route: event.target.value })} /></Field>
@@ -386,11 +387,11 @@ export function CareWorkflow({ encounterId }: { encounterId: string }) {
   }
 
   return (
-    <div className="grid grid-cols-2 gap-3 max-[900px]:grid-cols-1">
+    <div className="grid grid-cols-2 gap-3 max-[980px]:grid-cols-1">
       <section className="card">
         <h2 className="mb-2 text-sm font-semibold">Treatment actually given</h2>
         <div className="grid grid-cols-2 gap-2">
-          <Field label="Action / medication"><input className={inputClass} placeholder="Oxygen started, morphine given..." value={treatment.name} onChange={(event) => setTreatment({ ...treatment, name: event.target.value })} /></Field>
+          <Field label="Action / medication" required><input className={inputClass} list="treatment-name-options" placeholder="Oxygen started, morphine given..." value={treatment.name} onChange={(event) => setTreatment({ ...treatment, name: event.target.value })} /><datalist id="treatment-name-options">{TREATMENT_OPTIONS.map((option) => <option key={option} value={option} />)}</datalist></Field>
           <Field label="Dose / details"><input className={inputClass} placeholder="10 L/min, 2 mg IV..." value={treatment.details} onChange={(event) => setTreatment({ ...treatment, details: event.target.value })} /></Field>
           <Field label="Performed by"><input className={inputClass} value={treatment.actor} onChange={(event) => setTreatment({ ...treatment, actor: event.target.value })} /></Field>
           <div className="flex items-end justify-end"><button onClick={() => void saveTreatment()} className="h-[34px] rounded-md bg-[var(--color-primary)] px-3 text-sm font-semibold text-white">Record treatment</button></div>
@@ -398,15 +399,15 @@ export function CareWorkflow({ encounterId }: { encounterId: string }) {
       </section>
       <section className="card">
         <h2 className="mb-2 text-sm font-semibold">Reassessment</h2>
-        <div className="grid grid-cols-[130px_90px_1fr] gap-2 max-[620px]:grid-cols-1">
+        <div className="grid grid-cols-[minmax(110px,130px)_minmax(80px,90px)_1fr] gap-2 max-[560px]:grid-cols-1">
           <Field label="Response"><select className={inputClass} value={reassessment.response} onChange={(event) => setReassessment({ ...reassessment, response: event.target.value as typeof reassessment.response })}><option>improved</option><option>unchanged</option><option>worse</option></select></Field>
           <Field label="Pain 0-10"><input type="number" min="0" max="10" className={inputClass} value={reassessment.painScore} onChange={(event) => setReassessment({ ...reassessment, painScore: event.target.value })} /></Field>
-          <Field label="Findings"><input className={inputClass} placeholder="Response, new findings, next step" value={reassessment.notes} onChange={(event) => setReassessment({ ...reassessment, notes: event.target.value })} /></Field>
+          <Field label="Findings" required><input className={inputClass} placeholder="Response, new findings, next step" value={reassessment.notes} onChange={(event) => setReassessment({ ...reassessment, notes: event.target.value })} /></Field>
           <Field label="Recorded by"><input className={inputClass} value={reassessment.actor} onChange={(event) => setReassessment({ ...reassessment, actor: event.target.value })} /></Field>
-          <div className="col-span-2 flex items-end justify-end max-[620px]:col-span-1"><button onClick={() => void saveReassessment()} className="h-[34px] rounded-md bg-[var(--color-primary)] px-3 text-sm font-semibold text-white">Add reassessment</button></div>
+          <div className="col-span-2 flex items-end justify-end max-[560px]:col-span-1"><button onClick={() => void saveReassessment()} className="h-[34px] rounded-md bg-[var(--color-primary)] px-3 text-sm font-semibold text-white">Add reassessment</button></div>
         </div>
       </section>
-      <div className="col-span-2 max-[900px]:col-span-1">
+      <div className="col-span-2 max-[980px]:col-span-1">
         <TimelinePanel title="Care timeline" empty="No treatment or reassessment recorded yet.">
           {careEvents.map((event) => {
             const content = eventContent<{ name?: string; medication?: string; administeredDose?: string; notAdministeredReason?: string | null; details?: string; response?: string; painScore?: number | null; notes?: string; actor?: string }>(event);
@@ -458,6 +459,14 @@ export function DispositionWorkflow({ encounterId }: { encounterId: string }) {
   const [actor, setActor] = useState(actorDefault(view?.encounter.currentProvider));
   const timeline = events.filter((event) => event.type === "disposition" || event.type === "disposition_status");
   const activeDisposition = view?.encounter.disposition ?? null;
+  const steps = activeDisposition ? dispositionSteps(activeDisposition) : [];
+  const completedValues = new Set(
+    timeline
+      .map((event) => eventContent<{ status?: string }>(event).status)
+      .filter((status): status is string => Boolean(status)),
+  );
+  const nextStepIndex = steps.findIndex((step) => !completedValues.has(step.value));
+  const encounterClosed = steps.some((step) => step.closes && completedValues.has(step.value));
 
   async function decide() {
     await setDispositionDecision(encounterId, selection, actor, details, mode);
@@ -467,21 +476,60 @@ export function DispositionWorkflow({ encounterId }: { encounterId: string }) {
   return (
     <div className="space-y-3">
       <section className="card">
-        <div className="grid grid-cols-[minmax(260px,1fr)_minmax(220px,1fr)_180px_auto] items-end gap-2 max-[900px]:grid-cols-2">
-          <Field label="Disposition decision"><select className={inputClass} value={selection} onChange={(event) => setSelection(event.target.value as Disposition)}>{DISPOSITIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></Field>
+        <div className="grid grid-cols-[minmax(200px,1fr)_minmax(200px,1fr)_minmax(130px,180px)_auto] items-end gap-2 max-[980px]:grid-cols-2">
+          <Field label="Disposition decision" required><select className={inputClass} value={selection} onChange={(event) => setSelection(event.target.value as Disposition)}>{DISPOSITIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></Field>
           <Field label="Destination / instructions / reason"><input className={inputClass} value={details} onChange={(event) => setDetails(event.target.value)} /></Field>
           <Field label="Decided by"><input className={inputClass} value={actor} onChange={(event) => setActor(event.target.value)} /></Field>
           <button onClick={() => void decide()} className="h-[34px] rounded-md bg-[var(--color-primary)] px-3 text-sm font-semibold text-white">Record decision</button>
         </div>
       </section>
       {activeDisposition && (
-        <section className="card">
-          <div className="mb-2 flex flex-wrap items-center gap-2">
-            <h2 className="mr-auto text-sm font-semibold">Operational progress: {activeDisposition.replace(/_/g, " ")}</h2>
-            <span className="rounded bg-[var(--color-yellow-tint)] px-2 py-1 text-xs font-semibold text-[var(--color-yellow-text)]">Decision recorded; location remains {view?.encounter.currentLocationName ?? "unassigned"}</span>
+        <section className="card space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="mr-auto text-sm font-semibold">
+              {DISPOSITIONS.find((d) => d.value === activeDisposition)?.label ?? activeDisposition.replace(/_/g, " ")}
+            </h2>
+            {encounterClosed ? (
+              <span className="rounded bg-[var(--color-green-tint)] px-2 py-1 text-xs font-semibold text-[var(--color-green-text)]">Complete — patient departed</span>
+            ) : (
+              <span className="rounded bg-[var(--color-yellow-tint)] px-2 py-1 text-xs font-semibold text-[var(--color-yellow-text)]">
+                Waiting on: {nextStepIndex >= 0 ? steps[nextStepIndex].label.toLowerCase() : "next step"} · at {view?.encounter.currentLocationName ?? "unassigned"}
+              </span>
+            )}
           </div>
-          <div className="flex flex-wrap gap-2">
-            {dispositionSteps(activeDisposition).map((step) => <button key={step.value} onClick={() => void updateDispositionProgress(encounterId, step.value, actor, details, Boolean(step.closes), mode)} className="rounded-md border border-[var(--color-border)] px-2.5 py-1.5 text-xs font-semibold hover:border-[var(--color-primary)]">{step.label}</button>)}
+
+          {/* Compact progress flow: Decision -> each operational step -> close.
+              Purely a read-only visualization over existing dispositionStatus
+              events; step definitions and the update action are unchanged. */}
+          <ol className="flex flex-wrap items-center gap-1.5" aria-label="Disposition progress">
+            <FlowNode label="Decision" state="done" />
+            {steps.map((step, index) => {
+              const done = completedValues.has(step.value);
+              const isNext = index === nextStepIndex;
+              return (
+                <FlowNode key={step.value} label={step.label} state={done ? "done" : isNext ? "next" : "pending"} />
+              );
+            })}
+          </ol>
+
+          <div className="flex flex-wrap gap-2 border-t border-[var(--color-border)] pt-2">
+            {steps.map((step) => {
+              const done = completedValues.has(step.value);
+              return (
+                <button
+                  key={step.value}
+                  disabled={done}
+                  onClick={() => void updateDispositionProgress(encounterId, step.value, actor, details, Boolean(step.closes), mode)}
+                  className={`rounded-md border px-2.5 py-1.5 text-xs font-semibold ${
+                    done
+                      ? "border-[var(--color-border)] bg-[var(--color-surface-muted)] text-[var(--color-ink-secondary)]"
+                      : "border-[var(--color-border)] hover:border-[var(--color-primary)]"
+                  }`}
+                >
+                  {done ? `✓ ${step.label}` : step.label}
+                </button>
+              );
+            })}
           </div>
         </section>
       )}
@@ -495,23 +543,63 @@ export function DispositionWorkflow({ encounterId }: { encounterId: string }) {
   );
 }
 
-export function TriageHistory({ encounterId }: { encounterId: string }) {
-  const assessments = useTriageAssessments(encounterId);
+function FlowNode({ label, state }: { label: string; state: "done" | "next" | "pending" }) {
   return (
-    <div className="card">
-      <div className="mb-3 flex items-center justify-between">
-        <div><h2 className="text-sm font-semibold">Triage history</h2><p className="text-xs text-[var(--color-ink-secondary)]">Each re-triage creates a new record.</p></div>
-        <span className="text-xs font-semibold text-[var(--color-ink-secondary)]">{assessments.length} assessment{assessments.length === 1 ? "" : "s"}</span>
-      </div>
-      <div className="space-y-2">
-        {assessments.map((assessment, index) => <div key={assessment.id} className="grid grid-cols-[90px_1fr_auto] items-center gap-3 border-b border-[var(--color-border)] pb-2 last:border-0 last:pb-0"><TriageBadge level={assessment.level} size="sm" /><div><div className="text-sm font-semibold">{index === 0 ? "Current priority" : "Previous priority"}</div><div className="text-xs text-[var(--color-ink-secondary)]">{assessment.note || `${assessment.algorithm.toUpperCase()} assessment`}</div></div><EventTime value={assessment.performedAt} /></div>)}
-      </div>
-    </div>
+    <li
+      className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ${
+        state === "done"
+          ? "bg-[var(--color-green-tint)] text-[var(--color-green-text)]"
+          : state === "next"
+            ? "border border-[var(--color-primary)] bg-[var(--color-primary-tint)] text-[var(--color-primary)]"
+            : "bg-[var(--color-surface-muted)] text-[var(--color-ink-secondary)]"
+      }`}
+    >
+      {state === "done" ? <CheckCircle2 size={13} /> : null}
+      {label}
+    </li>
   );
 }
 
-function Field({ label, className = "", children }: { label: string; className?: string; children: React.ReactNode }) {
-  return <label className={className}><span className={labelClass}>{label}</span>{children}</label>;
+export function TriageHistory({ encounterId }: { encounterId: string }) {
+  const assessments = useTriageAssessments(encounterId);
+  return (
+    <section className="triage-section">
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold">Triage history</h2>
+        <span className="text-xs font-semibold text-[var(--color-ink-secondary)]">{assessments.length} assessment{assessments.length === 1 ? "" : "s"}</span>
+      </div>
+      {assessments.length === 0 ? (
+        <p className="mt-1 text-sm text-[var(--color-ink-secondary)]">No triage assessment has been recorded.</p>
+      ) : (
+        <ol className="mt-2 border-t border-[var(--color-border)]">
+          {assessments.map((assessment, index) => (
+            <li key={assessment.id} className="grid grid-cols-[64px_72px_minmax(0,1fr)] items-center gap-2 border-b border-[var(--color-border)] py-1.5 last:border-0 max-[520px]:grid-cols-[58px_72px_minmax(0,1fr)]">
+              <time className="text-xs font-semibold tabular-nums text-[var(--color-ink-secondary)]">
+                {new Date(assessment.performedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+              </time>
+              <span className="shrink-0"><TriageBadge level={assessment.level} size="sm" /></span>
+              <div className="min-w-0 flex-1">
+                <span className="text-sm font-semibold">{index === 0 ? "Current" : "Previous"}</span>
+                <span className="ml-2 text-xs text-[var(--color-ink-secondary)]">{assessment.note || `${assessment.algorithm.toUpperCase()} assessment`}</span>
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+}
+
+function Field({ label, required = false, className = "", children }: { label: string; required?: boolean; className?: string; children: React.ReactNode }) {
+  return (
+    <label className={className}>
+      <span className={labelClass}>
+        {label}
+        {required && <span className="ml-0.5 text-[var(--color-red-solid)]">*</span>}
+      </span>
+      {children}
+    </label>
+  );
 }
 
 function TimelinePanel({ title, empty, children }: { title: string; empty: string; children: React.ReactNode }) {

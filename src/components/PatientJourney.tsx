@@ -110,7 +110,7 @@ export function PatientJourney({ encounterId }: { encounterId: string }) {
               {view.patient.mrn ?? view.patient.displayNumber} | {view.encounter.caseNumber ?? view.encounter.id.slice(0, 8)}
             </p>
           </div>
-          <div className="grid grid-cols-4 gap-2 max-[700px]:grid-cols-2">
+          <div className="grid grid-cols-4 gap-2 max-[720px]:grid-cols-2">
             <JourneyMetric label="Time in ER" value={formatDuration(Date.now() - view.encounter.arrivedAt)} />
             <JourneyMetric label="Events" value={String(journey.items.length)} />
             <JourneyMetric label="Orders" value={String(orderCount)} />
@@ -118,41 +118,39 @@ export function PatientJourney({ encounterId }: { encounterId: string }) {
           </div>
         </div>
 
-        <div className="overflow-x-auto pb-2">
-          <div className="grid min-w-[1080px] grid-cols-9 px-1">
-            {journey.stages.map((stage, index) => {
-              const completed = stage.timestamp !== null;
-              const active = index === currentStageIndex;
-              const Icon = stage.icon;
-              return (
-                <div key={stage.key} className="relative flex min-w-0 flex-col items-center text-center">
-                  {index > 0 && (
-                    <div
-                      className="absolute right-1/2 top-5 h-0.5 w-full"
-                      style={{ background: completed ? "var(--color-green-solid)" : "var(--color-border-strong)" }}
-                    />
-                  )}
+        <div className="grid grid-cols-9 gap-y-4 px-1 max-[980px]:grid-cols-5 max-[560px]:grid-cols-3">
+          {journey.stages.map((stage, index) => {
+            const completed = stage.timestamp !== null;
+            const active = index === currentStageIndex;
+            const Icon = stage.icon;
+            return (
+              <div key={stage.key} className="relative flex min-w-0 flex-col items-center text-center">
+                {index > 0 && (
                   <div
-                    className="relative z-10 flex h-10 w-10 items-center justify-center rounded-full border-2"
-                    style={{
-                      background: completed ? "var(--color-green-tint)" : active ? "var(--color-primary-tint)" : "var(--color-surface)",
-                      borderColor: completed ? "var(--color-green-solid)" : active ? "var(--color-primary)" : "var(--color-border-strong)",
-                      color: completed ? "var(--color-green-solid)" : active ? "var(--color-primary)" : "var(--color-ink-secondary)",
-                    }}
-                  >
-                    {completed ? <Check size={18} /> : <Icon size={17} />}
-                  </div>
-                  <div className="mt-2 text-sm font-semibold">{stage.label}</div>
-                  <div className="mt-0.5 min-h-4 text-xs text-[var(--color-ink-secondary)]">
-                    {stage.timestamp ? formatTime(stage.timestamp) : active ? "Next" : "Pending"}
-                  </div>
-                  {Boolean(stage.count && stage.count > 1) && (
-                    <span className="mt-1 rounded-full bg-[var(--color-surface-muted)] px-1.5 py-0.5 text-xs font-semibold">{stage.count}</span>
-                  )}
+                    className="absolute right-1/2 top-5 h-0.5 w-full max-[980px]:hidden"
+                    style={{ background: completed ? "var(--color-green-solid)" : "var(--color-border-strong)" }}
+                  />
+                )}
+                <div
+                  className="relative z-10 flex h-10 w-10 items-center justify-center rounded-full border-2"
+                  style={{
+                    background: completed ? "var(--color-green-tint)" : active ? "var(--color-primary-tint)" : "var(--color-surface)",
+                    borderColor: completed ? "var(--color-green-solid)" : active ? "var(--color-primary)" : "var(--color-border-strong)",
+                    color: completed ? "var(--color-green-solid)" : active ? "var(--color-primary)" : "var(--color-ink-secondary)",
+                  }}
+                >
+                  {completed ? <Check size={18} /> : <Icon size={17} />}
                 </div>
-              );
-            })}
-          </div>
+                <div className="mt-2 text-sm font-semibold">{stage.label}</div>
+                <div className="mt-0.5 min-h-4 text-xs text-[var(--color-ink-secondary)]">
+                  {stage.timestamp ? formatTime(stage.timestamp) : active ? "Next" : "Pending"}
+                </div>
+                {Boolean(stage.count && stage.count > 1) && (
+                  <span className="mt-1 rounded-full bg-[var(--color-surface-muted)] px-1.5 py-0.5 text-xs font-semibold">{stage.count}</span>
+                )}
+              </div>
+            );
+          })}
         </div>
       </section>
 
@@ -169,23 +167,23 @@ export function PatientJourney({ encounterId }: { encounterId: string }) {
           {journey.items.map((item) => {
             const Icon = item.icon;
             return (
-              <article key={item.id} className="relative grid grid-cols-[40px_92px_minmax(0,1fr)_auto] items-start gap-3 border-b border-[var(--color-border)] py-3 last:border-0 max-[700px]:grid-cols-[40px_minmax(0,1fr)]">
+              <article key={item.id} className="relative grid grid-cols-[40px_92px_minmax(0,1fr)_minmax(96px,auto)] items-start gap-3 border-b border-[var(--color-border)] py-3 last:border-0 max-[720px]:grid-cols-[40px_minmax(0,1fr)]">
                 <div
                   className="relative z-10 flex h-10 w-10 items-center justify-center rounded-full border"
                   style={{ background: toneBackground(item.tone), borderColor: toneColor(item.tone), color: toneColor(item.tone) }}
                 >
                   <Icon size={17} />
                 </div>
-                <time className="pt-1 text-sm font-semibold text-[var(--color-ink-secondary)] max-[700px]:hidden">{formatTime(item.timestamp)}</time>
+                <time className="pt-1 text-sm font-semibold text-[var(--color-ink-secondary)] max-[720px]:hidden">{formatTime(item.timestamp)}</time>
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <strong className="text-sm">{item.label}</strong>
                     <span className="rounded bg-[var(--color-surface-muted)] px-1.5 py-0.5 text-xs font-semibold capitalize text-[var(--color-ink-secondary)]">{item.type.replace(/_/g, " ")}</span>
                   </div>
                   <p className="mt-0.5 text-sm text-[var(--color-ink-secondary)]">{item.detail}</p>
-                  <div className="mt-1 hidden text-xs text-[var(--color-ink-secondary)] max-[700px]:block">{formatDateTime(item.timestamp)}</div>
+                  <div className="mt-1 hidden text-xs text-[var(--color-ink-secondary)] max-[720px]:block">{formatDateTime(item.timestamp)}</div>
                 </div>
-                <div className="max-w-44 truncate pt-1 text-right text-xs font-medium text-[var(--color-ink-secondary)] max-[700px]:col-start-2 max-[700px]:max-w-none max-[700px]:text-left">
+                <div className="pt-1 text-right text-xs font-medium text-[var(--color-ink-secondary)] max-[720px]:col-start-2 max-[720px]:text-left">
                   {item.actor ?? formatDate(item.timestamp)}
                 </div>
               </article>
@@ -234,9 +232,9 @@ function eventToJourneyItem(event: ClinicalEvent): JourneyItem {
 
 function JourneyMetric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="min-w-[92px] rounded-md bg-[var(--color-surface-muted)] px-2.5 py-1.5">
+    <div className="rounded-md bg-[var(--color-surface-muted)] px-2.5 py-1.5">
       <div className="text-xs font-semibold uppercase text-[var(--color-ink-secondary)]">{label}</div>
-      <div className="truncate text-sm font-semibold capitalize" title={value}>{value}</div>
+      <div className="text-sm font-semibold capitalize leading-snug">{value}</div>
     </div>
   );
 }
