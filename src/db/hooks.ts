@@ -32,6 +32,19 @@ import type {
   Attachment,
 } from "../types";
 
+export type AppNotificationSeverity = "info" | "warning" | "critical";
+
+export interface AppNotification {
+  id: string;
+  title: string;
+  message: string;
+  severity: AppNotificationSeverity;
+  createdAt: number;
+  href: string;
+  patientLabel: string;
+  actor?: string | null;
+}
+
 function useLiveQuery<T>(query: () => Promise<T>, deps: unknown[], initial: T): T {
   const [value, setValue] = useState<T>(initial);
   useEffect(() => {
@@ -147,6 +160,199 @@ export function useClinicalEvents(encounterId: string | undefined): ClinicalEven
     [encounterId],
     [],
   );
+}
+
+export function useRecentAppNotifications(limit = 40): AppNotification[] {
+  return useLiveQuery(
+    async () => {
+      const [clinicalEvents, auditEvents] = await Promise.all([
+        db.clinicalEvents.orderBy("recordedAt").reverse().limit(limit * 3).toArray(),
+        db.auditEvents.orderBy("timestamp").reverse().limit(limit * 3).toArray(),
+      ]);
+      const encounterIds = new Set<string>();
+      const patientIds = new Set<string>();
+      clinicalEvents.forEach((event) => encounterIds.add(event.encounterId));
+      auditEvents.forEach((event) => {
+        if (event.encounterId) encounterIds.add(event.encounterId);
+        if (event.patientId) patientIds.add(event.patientId);
+      });
+      const encounters = await db.encounters.bulkGet([...encounterIds]);
+      const encounterById = new Map(encounters.filter(Boolean).map((encounter) => [encounter!.id, encounter!]));
+      encounters.forEach((encounter) => {
+        if (encounter?.patientId) patientIds.add(encounter.patientId);
+      });
+      const patients = await db.patients.bulkGet([...patientIds]);
+      const patientById = new Map(patients.filter(Boolean).map((patient) => [patient!.id, patient!]));
+
+      const notifications = [
+        ...clinicalEvents.map((event) => notificationFromClinicalEvent(event, encounterById, patientById)),
+        ...auditEvents.map((event) => notificationFromAuditEvent(event, encounterById, patientById)),
+      ]
+        .filter((notification): notification is AppNotification => Boolean(notification))
+        .sort((a, b) => b.createdAt - a.createdAt);
+
+      return notifications.slice(0, limit);
+    },
+    [limit],
+    [],
+  );
+}
+
+function notificationFromClinicalEvent(
+  event: ClinicalEvent,
+  encounterById: Map<string, Encounter>,
+  patientById: Map<string, Patient>,
+): AppNotification | null {
+  const content = event.content ?? {};
+  const encounter = encounterById.get(event.encounterId);
+  const patient = encounter ? patientById.get(encounter.patientId) : undefined;
+  const base = notificationBase(`clinical:${event.id}`, event.recordedAt, event.encounterId, encounter, patient);
+  const actor = stringValue(content.actor);
+
+  switch (event.type) {
+    case "order": {
+      const name = stringValue(content.name) || "Order";
+      const priority = stringValue(content.priority);
+      return {
+        ...base,
+        title: `Order added: ${name}`,
+        message: [formatClinicalType(content.orderType), priority && `Priority ${priority}`].filter(Boolean).join(" | ") || "New order placed",
+        severity: priority === "stat" ? "warning" : "info",
+        actor,
+      };
+    }
+    case "order_status": {
+      const name = stringValue(content.name) || "Order";
+      const status = formatClinicalType(content.status) || "updated";
+      return { ...base, title: `${name} ${status}`, message: stringValue(content.reason) || "Order status changed", severity: status.includes("cancel") || status.includes("reject") || status.includes("fail") ? "warning" : "info", actor };
+    }
+    case "result": {
+      const name = stringValue(content.name) || "Result";
+      const critical = Boolean(content.critical);
+      return {
+        ...base,
+        title: critical ? `Critical result: ${name}` : `Result available: ${name}`,
+        message: stringValue(content.result) || formatClinicalType(content.flag) || "Result available",
+        severity: critical ? "critical" : content.flag === "abnormal" ? "warning" : "info",
+        actor,
+      };
+    }
+    case "critical_alert": {
+      const status = stringValue(content.status);
+      if (status === "acknowledged") {
+        return { ...base, title: "Critical result acknowledged", message: stringValue(content.actionTaken) || "Action documented", severity: "info", actor };
+      }
+      return { ...base, title: "Critical result requires acknowledgement", message: "Immediate review needed", severity: "critical", actor };
+    }
+    case "medication": {
+      const medication = stringValue(content.medication) || "Medication";
+      const held = Boolean(content.notAdministeredReason);
+      return {
+        ...base,
+        title: held ? `Medication not given: ${medication}` : `Medication administered: ${medication}`,
+        message: held ? stringValue(content.notAdministeredReason) || "Reason documented" : [stringValue(content.administeredDose), stringValue(content.route)].filter(Boolean).join(" ") || "Administration recorded",
+        severity: held ? "warning" : "info",
+        actor,
+      };
+    }
+    case "treatment":
+      return { ...base, title: `Treatment recorded: ${stringValue(content.name) || "Care action"}`, message: stringValue(content.details) || "Treatment documented", severity: "info", actor };
+    case "assessment":
+      return { ...base, title: "Assessment saved", message: stringValue(content.impression) || stringValue(content.plan) || "Clinical assessment documented", severity: "info", actor };
+    case "reassessment": {
+      const response = stringValue(content.response);
+      return { ...base, title: `Reassessment: ${response || "recorded"}`, message: stringValue(content.notes) || "Clinical response reviewed", severity: response === "worse" ? "warning" : "info", actor };
+    }
+    case "vitals": {
+      const news2 = numberValue(content.news2);
+      return { ...base, title: "Vitals saved", message: news2 !== null ? `NEWS2 ${news2}` : "Vitals recorded", severity: news2 !== null && news2 >= 7 ? "critical" : news2 !== null && news2 >= 5 ? "warning" : "info" };
+    }
+    case "re_triage":
+      return { ...base, title: `Triage updated: ${stringValue(content.algorithm)?.toUpperCase() ?? "Level"} ${String(content.level ?? "")}`.trim(), message: "Patient priority updated", severity: Number(content.level) <= 2 ? "warning" : "info" };
+    case "location":
+      return { ...base, title: stringValue(content.locationName) ? `Bed assigned: ${stringValue(content.locationName)}` : "Bed cleared", message: stringValue(content.reason) || stringValue(content.zone) || "Location updated", severity: "info" };
+    case "team":
+      return { ...base, title: "Provider assigned", message: stringValue(content.provider) || "Care team updated", severity: "info" };
+    case "disposition":
+      return { ...base, title: `Disposition decision: ${formatClinicalType(content.disposition) || "recorded"}`, message: stringValue(content.details) || "Disposition workflow started", severity: "info", actor };
+    case "disposition_status":
+      return { ...base, title: `Disposition step: ${formatClinicalType(content.status) || "updated"}`, message: stringValue(content.details) || "Disposition progress recorded", severity: content.closesEncounter ? "warning" : "info", actor };
+    default:
+      return null;
+  }
+}
+
+function notificationFromAuditEvent(
+  event: AuditEvent,
+  encounterById: Map<string, Encounter>,
+  patientById: Map<string, Patient>,
+): AppNotification | null {
+  const duplicateClinicalActions = new Set([
+    "order_added",
+    "order_placed",
+    "order_status_transition",
+    "result_added",
+    "result_recorded",
+    "critical_result_recorded",
+    "critical_alert_created",
+    "vitals_recorded",
+    "assessment_recorded",
+    "treatment_recorded",
+    "reassessment_recorded",
+    "disposition_decided",
+  ]);
+  if (duplicateClinicalActions.has(event.action)) return null;
+  const encounter = event.encounterId ? encounterById.get(event.encounterId) : undefined;
+  const patient = event.patientId ? patientById.get(event.patientId) : encounter ? patientById.get(encounter.patientId) : undefined;
+  const base = notificationBase(`audit:${event.id}`, event.timestamp, event.encounterId ?? null, encounter, patient);
+  const value = event.newValue || event.previousValue || "";
+
+  switch (event.action) {
+    case "medication_added":
+      return { ...base, title: `Medication added: ${value || "Medication"}`, message: "Medication list updated", severity: "info", actor: event.actor };
+    case "allergy_added":
+      return { ...base, title: `Allergy added: ${value || "Allergy"}`, message: "Allergy list updated", severity: "critical", actor: event.actor };
+    case "condition_added":
+      return { ...base, title: `Condition added: ${value || "Condition"}`, message: "Patient history updated", severity: "info", actor: event.actor };
+    case "procedure_added":
+      return { ...base, title: `Procedure added: ${value || "Procedure"}`, message: "Procedure record created", severity: "info", actor: event.actor };
+    case "immunization_added":
+      return { ...base, title: `Immunization added: ${value || "Vaccine"}`, message: "Immunization record updated", severity: "info", actor: event.actor };
+    case "billing_added":
+      return { ...base, title: `Billing item added: ${value || "Item"}`, message: "Billing record updated", severity: "info", actor: event.actor };
+    case "attachment_added":
+      return { ...base, title: `Attachment added: ${value || "File"}`, message: "Document added to chart", severity: "info", actor: event.actor };
+    default:
+      return null;
+  }
+}
+
+function notificationBase(
+  id: string,
+  createdAt: number,
+  encounterId: string | null,
+  encounter: Encounter | undefined,
+  patient: Patient | undefined,
+) {
+  const patientLabel = patient?.name ?? patient?.displayNumber ?? encounter?.caseNumber ?? "Patient";
+  return {
+    id,
+    createdAt,
+    href: encounterId ? `/patients/${encounterId}` : "/patients",
+    patientLabel,
+  };
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function numberValue(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function formatClinicalType(value: unknown) {
+  return stringValue(value)?.replace(/_/g, " ") ?? null;
 }
 
 export function useAllPatients(): Patient[] {

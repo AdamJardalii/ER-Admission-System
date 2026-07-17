@@ -627,6 +627,8 @@ export interface ConditionRecord {
   patientId: string;
   encounterId: string | null;
   name: string;
+  icd10Code?: string | null;
+  icd10Description?: string | null;
   category: string | null;
   onsetDate: string | null;
   status: ConditionStatus;

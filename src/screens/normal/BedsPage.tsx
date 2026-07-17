@@ -5,6 +5,7 @@ import { db } from "../../db/db";
 import { useBeds, useZones, useAllActiveEncounters } from "../../db/hooks";
 import { TriageBadge } from "../../components/TriageBadge";
 import { QuickOrderDrawer } from "../../components/PatientQuickActions";
+import { FloatingDropdown } from "../../components/FloatingDropdown";
 import { assignLocation, clearEncounterLocation } from "../../db/repo";
 import { useAppStore } from "../../store/useAppStore";
 import type { EncounterView } from "../../db/hooks";
@@ -176,31 +177,19 @@ export function BedsPage() {
                   );
                 }
                 return (
-                  <div key={bed.id} className="relative">
-                    <button
-                      type="button"
-                      onClick={() => setAssigningBedId(assigningBedId === bed.id ? null : bed.id)}
-                      onContextMenu={(event) => {
-                        event.preventDefault();
-                        openBedMenu(bed.id, event.clientX, event.clientY);
-                      }}
-                      onKeyDown={(event) => menuKeyDown(event, bed.id)}
-                      className="h-[76px] w-full overflow-hidden rounded-md border border-[var(--color-open-bed-border)] bg-[var(--color-green-tint)] p-2 text-left text-sm text-[var(--color-green-solid)] transition hover:border-[var(--color-green-solid)] hover:bg-[var(--color-open-bed-hover)] focus:outline-none focus:ring-2 focus:ring-[var(--color-green-solid)]"
-                      aria-label={`Open ${bed.name}, available. Press Shift F10 for actions.`}
-                    >
-                      <div className="mb-1.5 inline-flex rounded bg-white px-1.5 py-0.5 text-xs font-bold">
-                        {bed.name}
-                      </div>
-                      <div className="text-[13px] font-semibold leading-tight">Available</div>
-                      <div className="mt-0.5 text-xs leading-tight text-[var(--color-green-text)]">Assign patient</div>
-                    </button>
-                    {assigningBedId === bed.id && (
-                      <AssignPatientMenu
-                        unassigned={unassigned}
-                        onAssign={(encounterId) => void assign(bed.id, bed.name, zone.id, encounterId)}
-                      />
-                    )}
-                  </div>
+                  <AvailableBedCard
+                    key={bed.id}
+                    bed={bed}
+                    assigning={assigningBedId === bed.id}
+                    unassigned={unassigned}
+                    onToggleAssign={() => setAssigningBedId(assigningBedId === bed.id ? null : bed.id)}
+                    onOpenContextMenu={(event) => {
+                      event.preventDefault();
+                      openBedMenu(bed.id, event.clientX, event.clientY);
+                    }}
+                    onMenuKeyDown={(event) => menuKeyDown(event, bed.id)}
+                    onAssign={(encounterId) => void assign(bed.id, bed.name, zone.id, encounterId)}
+                  />
                 );
               })}
             </div>
@@ -241,15 +230,69 @@ export function BedsPage() {
   );
 }
 
+function AvailableBedCard({
+  bed,
+  assigning,
+  unassigned,
+  onToggleAssign,
+  onOpenContextMenu,
+  onMenuKeyDown,
+  onAssign,
+}: {
+  bed: Bed;
+  assigning: boolean;
+  unassigned: EncounterView[];
+  onToggleAssign: () => void;
+  onOpenContextMenu: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  onMenuKeyDown: (event: React.KeyboardEvent<HTMLElement>) => void;
+  onAssign: (encounterId: string) => void;
+}) {
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  return (
+    <div className="relative">
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={onToggleAssign}
+        onContextMenu={onOpenContextMenu}
+        onKeyDown={onMenuKeyDown}
+        className="h-[76px] w-full overflow-hidden rounded-md border border-[var(--color-open-bed-border)] bg-[var(--color-green-tint)] p-2 text-left text-sm text-[var(--color-green-solid)] transition hover:border-[var(--color-green-solid)] hover:bg-[var(--color-open-bed-hover)] focus:outline-none focus:ring-2 focus:ring-[var(--color-green-solid)]"
+        aria-label={`Open ${bed.name}, available. Press Shift F10 for actions.`}
+      >
+        <div className="mb-1.5 inline-flex rounded bg-white px-1.5 py-0.5 text-xs font-bold">
+          {bed.name}
+        </div>
+        <div className="text-[13px] font-semibold leading-tight">Available</div>
+        <div className="mt-0.5 text-xs leading-tight text-[var(--color-green-text)]">Assign patient</div>
+      </button>
+      {assigning && (
+        <AssignPatientMenu
+          triggerRef={triggerRef}
+          unassigned={unassigned}
+          onAssign={onAssign}
+        />
+      )}
+    </div>
+  );
+}
+
 function AssignPatientMenu({
+  triggerRef,
   unassigned,
   onAssign,
 }: {
+  triggerRef: React.RefObject<HTMLButtonElement | null>;
   unassigned: EncounterView[];
   onAssign: (encounterId: string) => void;
 }) {
   return (
-    <div className="absolute left-0 top-full z-10 mt-1 max-h-64 w-64 overflow-auto rounded-lg border border-[var(--color-border)] bg-white p-2 shadow-lg">
+    <FloatingDropdown
+      open
+      triggerRef={triggerRef}
+      minWidth={256}
+      className="w-64 rounded-lg border border-[var(--color-border)] bg-white p-2 shadow-lg"
+    >
       {unassigned.length === 0 ? (
         <div className="p-2 text-xs text-[var(--color-ink-secondary)]">
           No unassigned patients waiting.
@@ -267,7 +310,7 @@ function AssignPatientMenu({
           </button>
         ))
       )}
-    </div>
+    </FloatingDropdown>
   );
 }
 

@@ -68,6 +68,10 @@ import {
   billingMetaFor,
   ATTACHMENT_TITLE_OPTIONS,
 } from "../../../lib/clinicalCatalog";
+import {
+  OFFICIAL_ICD10_CONDITION_SELECT_OPTIONS,
+  officialIcd10ConditionMetaFor,
+} from "../../../lib/icd10ProductionCatalog";
 import type { Mode } from "../../../types";
 
 function fmtDate(value: number | null | undefined) {
@@ -138,7 +142,7 @@ export function MedicationsTab({ patientId, encounterId }: { patientId: string; 
         { header: "Status", render: (r) => <StatusPill label={r.status} tone={tone(r.status)} /> },
       ]}
       fields={[
-        { key: "name", label: "Medication", required: true, span: 2, suggestions: MEDICATION_OPTIONS, placeholder: "Amlodipine 5 mg" },
+        { key: "name", label: "Medication", required: true, span: 2, suggestions: MEDICATION_OPTIONS, catalogKind: "medication", placeholder: "Amlodipine 5 mg" },
         { key: "dose", label: "Dose", placeholder: "5 mg" },
         { key: "route", label: "Route", type: "select", options: ["", ...ROUTE_OPTIONS] },
         { key: "frequency", label: "Frequency", type: "select", options: ["", ...FREQUENCY_OPTIONS] },
@@ -166,6 +170,7 @@ export function ConditionsTab({ patientId, encounterId }: { patientId: string; e
       rows={rows}
       addLabel="Add condition"
       columns={[
+        { header: "ICD-10", render: (r) => r.icd10Code ? <StatusPill label={r.icd10Code} tone="primary" /> : "—" },
         { header: "Condition", primary: true, render: (r) => r.name },
         { header: "Category", render: (r) => r.category || "—" },
         { header: "Onset", render: (r) => r.onsetDate || "—" },
@@ -173,16 +178,20 @@ export function ConditionsTab({ patientId, encounterId }: { patientId: string; e
         { header: "Notes", render: (r) => r.notes || "—" },
       ]}
       fields={[
-        { key: "name", label: "Condition", required: true, span: 2, suggestions: CONDITION_OPTIONS },
+        { key: "icd10Code", label: "ICD-10-CM diagnosis", type: "select", span: 2, options: OFFICIAL_ICD10_CONDITION_SELECT_OPTIONS, placeholder: "Select ICD-10-CM code", onChange: (code) => {
+          const meta = officialIcd10ConditionMetaFor(code);
+          return meta ? { name: meta.diagnosis, category: meta.category, icd10Description: meta.diagnosis } : undefined;
+        } },
+        { key: "name", label: "Diagnosis / condition", required: true, span: 2, suggestions: CONDITION_OPTIONS },
         { key: "category", label: "Category", type: "select", options: ["", ...CONDITION_CATEGORY_OPTIONS] },
         { key: "onsetDate", label: "Onset date", type: "date" },
         { key: "status", label: "Status", type: "select", options: ["active", "chronic", "resolved"] },
         { key: "notes", label: "Notes", type: "textarea", span: 2 },
       ]}
-      emptyDraft={{ name: "", category: "", onsetDate: "", status: "active", notes: "" }}
-      toDraft={(r) => ({ name: r.name, category: r.category ?? "", onsetDate: r.onsetDate ?? "", status: r.status, notes: r.notes ?? "" })}
-      onAdd={(d) => addCondition({ patientId, encounterId, name: d.name, category: d.category || null, onsetDate: d.onsetDate || null, status: d.status as "active" | "resolved" | "chronic", notes: d.notes || null }, mode)}
-      onUpdate={(id, d) => updateCondition(id, { name: d.name, category: d.category || null, onsetDate: d.onsetDate || null, status: d.status as "active" | "resolved" | "chronic", notes: d.notes || null }, mode)}
+      emptyDraft={{ icd10Code: "", icd10Description: "", name: "", category: "", onsetDate: "", status: "active", notes: "" }}
+      toDraft={(r) => ({ icd10Code: r.icd10Code ?? "", icd10Description: r.icd10Description ?? "", name: r.name, category: r.category ?? "", onsetDate: r.onsetDate ?? "", status: r.status, notes: r.notes ?? "" })}
+      onAdd={(d) => addCondition({ patientId, encounterId, name: d.name, icd10Code: d.icd10Code || null, icd10Description: d.icd10Description || d.name || null, category: d.category || null, onsetDate: d.onsetDate || null, status: d.status as "active" | "resolved" | "chronic", notes: d.notes || null }, mode)}
+      onUpdate={(id, d) => updateCondition(id, { name: d.name, icd10Code: d.icd10Code || null, icd10Description: d.icd10Description || d.name || null, category: d.category || null, onsetDate: d.onsetDate || null, status: d.status as "active" | "resolved" | "chronic", notes: d.notes || null }, mode)}
       onRemove={(id) => removeCondition(id, mode)}
     />
   );
@@ -212,7 +221,7 @@ export function OrdersTab({ patientId, encounterId }: { patientId: string; encou
       fields={[
         { key: "orderType", label: "Type", type: "select", options: ORDER_TYPE_OPTIONS, onChange: () => undefined },
         { key: "priority", label: "Priority", type: "select", options: ["routine", "urgent", "stat"] },
-        { key: "name", label: "Order", required: true, span: 2, suggestions: orderOptionsFor("laboratory"), placeholder: "CBC, CT head…" },
+        { key: "name", label: "Order", required: true, span: 2, suggestions: orderOptionsFor("laboratory"), catalogKind: "laboratory", placeholder: "CBC, CT head…" },
         { key: "details", label: "Details", span: 2, placeholder: "Dose, site, clinical question" },
         { key: "actor", label: "Ordered by", placeholder: "Dr. …" },
       ]}
@@ -245,7 +254,7 @@ export function ResultsTab({ patientId, encounterId }: { patientId: string; enco
       ]}
       minTableWidth={780}
       fields={[
-        { key: "name", label: "Test", required: true, span: 2, suggestions: RESULT_NAME_OPTIONS, onChange: (value) => {
+        { key: "name", label: "Test", required: true, span: 2, suggestions: RESULT_NAME_OPTIONS, catalogKind: "result", onChange: (value) => {
           const meta = resultMetaFor(value);
           return meta ? ({ unit: meta.unit, referenceRange: meta.referenceRange } as never) : undefined;
         } },
@@ -284,7 +293,7 @@ export function ProceduresTab({ patientId, encounterId }: { patientId: string; e
       ]}
       minTableWidth={780}
       fields={[
-        { key: "name", label: "Procedure", required: true, span: 2, suggestions: PROCEDURE_OPTIONS },
+        { key: "name", label: "Procedure", required: true, span: 2, suggestions: PROCEDURE_OPTIONS, catalogKind: "procedure" },
         { key: "category", label: "Category", type: "select", options: ["", ...PROCEDURE_CATEGORY_OPTIONS] },
         { key: "performedAt", label: "Performed date", type: "date" },
         { key: "operator", label: "Operator", placeholder: "Dr. / Nurse …" },

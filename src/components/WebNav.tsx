@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import {
   AlertTriangle,
+  Bell,
+  CheckCheck,
   ChevronDown,
   HeartPulse,
   MapPin,
@@ -11,7 +13,8 @@ import {
   Sun,
   X,
 } from "lucide-react";
-import { useAllOrderRecords, useAllResultRecords } from "../db/hooks";
+import { useAllOrderRecords, useAllResultRecords, useRecentAppNotifications, type AppNotification } from "../db/hooks";
+import { FloatingDropdown } from "./FloatingDropdown";
 import { criticalResultRequiresAcknowledgement, isOrderOverdue, isOrderTerminal, resultRequiresAttention } from "../lib/clinicalWorkflow";
 import { useNow } from "../lib/useNow";
 import { useAppStore } from "../store/useAppStore";
@@ -56,6 +59,7 @@ const CRISIS_TABS: NavigationItem[] = [
   { to: "/incident", label: "Incident" },
   { to: "/reconcile", label: "Reconcile" },
 ];
+const NOTIFICATION_READ_STORAGE_KEY = "er-system.notifications.read-at";
 
 export function WebNav() {
   const mode = useAppStore((s) => s.mode);
@@ -233,6 +237,7 @@ export function WebNav() {
           >
             <Search size={19} />
           </button>
+          <NotificationsBell />
           <button
             type="button"
             onClick={() => navigate("/incident")}
@@ -313,6 +318,147 @@ export function WebNav() {
       </div>
     </header>
   );
+}
+
+function NotificationsBell() {
+  const notifications = useRecentAppNotifications(50);
+  const [open, setOpen] = useState(false);
+  const [readAt, setReadAt] = useState(() => loadNotificationReadAt());
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const unreadCount = notifications.filter((notification) => notification.createdAt > readAt).length;
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOnOutside = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!triggerRef.current?.contains(target) && !menuRef.current?.contains(target)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
+    };
+    document.addEventListener("pointerdown", closeOnOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  function markRead(timestamp = Date.now()) {
+    setReadAt(timestamp);
+    window.localStorage.setItem(NOTIFICATION_READ_STORAGE_KEY, String(timestamp));
+  }
+
+  function toggleOpen() {
+    setOpen((current) => {
+      const next = !current;
+      if (next) markRead();
+      return next;
+    });
+  }
+
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={toggleOpen}
+        className="relative inline-flex h-11 w-10 items-center justify-center rounded-md text-white/90 hover:bg-white/10 hover:text-white"
+        aria-label={unreadCount > 0 ? `${unreadCount} unread notifications` : "Notifications"}
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        title="Notifications"
+      >
+        <Bell size={18} />
+        {unreadCount > 0 && (
+          <span className="absolute right-1 top-1 inline-flex min-w-4 items-center justify-center rounded-full bg-[var(--color-red-solid)] px-1 text-[10px] font-bold leading-4 text-white">
+            {unreadCount > 99 ? "99+" : unreadCount}
+          </span>
+        )}
+      </button>
+      <FloatingDropdown
+        open={open}
+        triggerRef={triggerRef}
+        contentRef={menuRef}
+        align="end"
+        minWidth={360}
+        maxWidth={420}
+        role="dialog"
+        ariaLabel="Notifications"
+        className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-ink)] shadow-xl"
+      >
+        <div className="flex min-h-11 items-center justify-between gap-3 border-b border-[var(--color-border)] px-3">
+          <div>
+            <h2 className="text-sm font-semibold">Notifications</h2>
+            <p className="text-xs text-[var(--color-ink-secondary)]">{notifications.length ? "Recent clinical events" : "No recent events"}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => markRead()}
+            className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-xs font-semibold text-[var(--color-primary)] hover:bg-[var(--color-primary-tint)]"
+          >
+            <CheckCheck size={14} /> Mark read
+          </button>
+        </div>
+        <div className="max-h-[min(520px,calc(100vh-120px))] overflow-y-auto">
+          {notifications.length === 0 ? (
+            <p className="px-3 py-4 text-sm text-[var(--color-ink-secondary)]">Main clinical events will appear here when they are added.</p>
+          ) : (
+            notifications.map((notification) => (
+              <NotificationRow key={notification.id} notification={notification} unread={notification.createdAt > readAt} onSelect={() => setOpen(false)} />
+            ))
+          )}
+        </div>
+      </FloatingDropdown>
+    </>
+  );
+}
+
+function NotificationRow({ notification, unread, onSelect }: { notification: AppNotification; unread: boolean; onSelect: () => void }) {
+  return (
+    <Link
+      to={notification.href}
+      onClick={onSelect}
+      className={`grid grid-cols-[10px_minmax(0,1fr)] gap-2 border-b border-[var(--color-border)] px-3 py-2.5 text-left last:border-0 hover:bg-[var(--color-surface-muted)] ${unread ? "bg-[var(--color-primary-tint)]" : ""}`}
+    >
+      <span className={`mt-1.5 h-2.5 w-2.5 rounded-full ${notificationDotClass(notification.severity)}`} aria-hidden="true" />
+      <span className="min-w-0">
+        <span className="flex items-start justify-between gap-2">
+          <strong className="min-w-0 break-words text-sm leading-snug">{notification.title}</strong>
+          <time className="shrink-0 text-[11px] font-semibold text-[var(--color-ink-secondary)]">{formatNotificationTime(notification.createdAt)}</time>
+        </span>
+        <span className="mt-0.5 block break-words text-xs text-[var(--color-ink-secondary)]">{notification.message}</span>
+        <span className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[11px] font-semibold text-[var(--color-ink-secondary)]">
+          <span>{notification.patientLabel}</span>
+          {notification.actor && <span>By {notification.actor}</span>}
+        </span>
+      </span>
+    </Link>
+  );
+}
+
+function notificationDotClass(severity: string) {
+  if (severity === "critical") return "bg-[var(--color-red-solid)]";
+  if (severity === "warning") return "bg-[var(--color-yellow-solid)]";
+  return "bg-[var(--color-primary)]";
+}
+
+function formatNotificationTime(value: number) {
+  const deltaMs = Date.now() - value;
+  const minute = 60 * 1000;
+  if (deltaMs < minute) return "now";
+  if (deltaMs < 60 * minute) return `${Math.floor(deltaMs / minute)}m`;
+  return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function loadNotificationReadAt() {
+  if (typeof window === "undefined") return 0;
+  const value = Number(window.localStorage.getItem(NOTIFICATION_READ_STORAGE_KEY));
+  return Number.isFinite(value) ? value : 0;
 }
 
 function PrimaryNavLink({ item, mobile = false }: { item: NavigationItem; mobile?: boolean }) {

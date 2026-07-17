@@ -4,23 +4,26 @@ import {
   Activity,
   Banknote,
   Beaker,
-  CalendarDays,
   CheckCircle2,
   ChevronDown,
   Clock3,
   ClipboardList,
+  Droplets,
   Edit3,
   FileClock,
   FileText,
   FlaskConical,
+  HeartPulse,
   History as HistoryIcon,
   LayoutDashboard,
   ListChecks,
   MapPin,
   Menu,
+  MessageSquareWarning,
   MoreVertical,
   Paperclip,
   Pill,
+  Plus,
   QrCode,
   Scissors,
   Save,
@@ -30,20 +33,24 @@ import {
   Stethoscope,
   Syringe,
   TestTube2,
+  Thermometer,
   UserRound,
-  UserRoundCheck,
+  Wind,
   X as CloseIcon,
 } from "lucide-react";
 import {
   useEncounterView,
+  useAllActiveEncounters,
   useClinicalEvents,
   useAuditEvents,
   useVitalsSets,
+  useTriageAssessments,
   useAllPatients,
   useStateTransitions,
   useBeds,
   useZones,
   useMedications,
+  useAllergyRecords,
   useConditions,
   useOrderRecords,
   useResultRecords,
@@ -61,6 +68,7 @@ import {
   usePendingCases,
 } from "../../db/hooks";
 import { db } from "../../db/db";
+import { workflowStatusForEncounter } from "../../domain/encounterStateMachine";
 import { TriageBadge } from "../../components/TriageBadge";
 import { AiChip } from "../../components/AiChip";
 import { PatientIdentityModal } from "../../components/PatientIdentityModal";
@@ -77,9 +85,11 @@ import {
   updateEncounterField,
   setTriage,
   completeRegistration,
+  recordVitalsSet,
   mergePatientRecords,
   setEncounterPathway,
   assignLocation,
+  addAllergyRecord,
   addPatientIdentifier,
   updatePatientIdentifier,
   removePatientIdentifier,
@@ -94,7 +104,7 @@ import {
   upsertMilitaryRecord,
 } from "../../db/repo";
 import { useAppStore } from "../../store/useAppStore";
-import { triageRank, isEsi, triagePalette } from "../../lib/triage";
+import { triageRank, isEsi } from "../../lib/triage";
 import { fuzzyPatientMatches } from "../../lib/registration";
 import {
   BLOOD_GROUP_OPTIONS,
@@ -114,17 +124,14 @@ import {
   RELATIONSHIP_OPTIONS,
   TITLE_OPTIONS,
 } from "../../lib/registrationCatalog";
-import { latestVitals } from "../../lib/vitals";
+import { bandFor, latestVitals } from "../../lib/vitals";
+import { ALLERGY_OPTIONS } from "../../lib/clinicalCatalog";
 import {
   News2Banner,
-  TriageVitalsAdvisory,
-  CurrentVitalsSummary,
-  VitalsCaptureForm,
-  VitalsFlowsheet,
-  VitalsHeader,
+  VitalsConsole,
 } from "../../components/VitalsPanel";
-import { AllergiesBanner } from "./chart/AllergiesBanner";
-import { DomainTab, StatusPill } from "../../components/DomainTab";
+import { DomainTab, StatusPill, SuggestionInput } from "../../components/DomainTab";
+import { DropdownSelect } from "../../components/FloatingDropdown";
 import {
   MedicationsTab,
   ConditionsTab,
@@ -136,55 +143,58 @@ import {
   BillingTab,
   AttachmentsTab,
 } from "./chart/domainTabs";
-import type { EsiLevel, Patient, IdentifierType, InsurancePolicy, PatientIdentifier, RelatedPerson } from "../../types";
+import type { AllergySeverity, Encounter, EsiLevel, Patient, IdentifierType, InsurancePolicy, PatientIdentifier, RelatedPerson, TriageLevel } from "../../types";
 
 type NavIcon = typeof LayoutDashboard;
 
-const NAV_GROUPS = [
+type NavItemSpec = { tab: string; label: string; icon: NavIcon; badgeLabel?: string };
+
+const PRIMARY_NAV_GROUPS = [
   {
-    label: "Patient summary",
+    label: "Workflow",
     items: [
-      { tab: "Overview", label: "Overview", icon: LayoutDashboard },
-      { tab: "Personal", label: "Personal information", icon: UserRound },
-      { tab: "Vitals", label: "Vitals & biometrics", icon: Activity },
-    ],
-  },
-  {
-    label: "Clinical records",
-    items: [
-      { tab: "Medications", label: "Medications", icon: Pill },
-      { tab: "Conditions", label: "Conditions", icon: Stethoscope },
-      { tab: "Orders", label: "Orders", icon: FlaskConical },
-      { tab: "Results", label: "Results", icon: TestTube2 },
-      { tab: "Procedures", label: "Procedures", icon: Scissors },
-      { tab: "Immunizations", label: "Immunizations", icon: Syringe },
-    ],
-  },
-  {
-    label: "Care & workflow",
-    items: [
-      { tab: "Assessment", label: "Assessment", icon: ClipboardList },
-      { tab: "Care", label: "Care", icon: Beaker },
       { tab: "Triage", label: "Triage", icon: ShieldAlert },
+      { tab: "Assessment", label: "Assessment", icon: ClipboardList },
       { tab: "Disposition", label: "Disposition", icon: Signpost },
     ],
   },
   {
-    label: "Other",
+    label: "Chart",
     items: [
-      { tab: "Programs", label: "Programs", icon: ListChecks },
-      { tab: "Billing", label: "Billing", icon: Banknote },
-      { tab: "Attachments", label: "Attachments", icon: Paperclip },
+      { tab: "Vitals", label: "Vitals", icon: Activity },
+      { tab: "Medications", label: "Meds", icon: Pill, badgeLabel: "Meds" },
+      { tab: "Orders", label: "Orders", icon: FlaskConical, badgeLabel: "Orders" },
+      { tab: "Results", label: "Results", icon: TestTube2 },
       { tab: "Notes", label: "Notes", icon: FileText },
-      { tab: "Timeline", label: "Timeline", icon: FileClock },
-      { tab: "Visits", label: "Visits", icon: HistoryIcon },
+    ],
+  },
+  {
+    label: "Patient",
+    items: [
+      { tab: "Overview", label: "Overview", icon: LayoutDashboard },
+      { tab: "Personal", label: "Personal info", icon: UserRound },
       { tab: "History", label: "History", icon: HistoryIcon },
     ],
   },
-] satisfies { label: string; items: { tab: string; label: string; icon: NavIcon }[] }[];
+] satisfies { label: string; items: NavItemSpec[] }[];
 
-const TABS = NAV_GROUPS.flatMap((group) => group.items.map((item) => item.tab));
-type Tab = (typeof NAV_GROUPS)[number]["items"][number]["tab"];
+const MORE_NAV_ITEMS = [
+  { tab: "Conditions", label: "Conditions", icon: Stethoscope },
+  { tab: "Procedures", label: "Procedures", icon: Scissors },
+  { tab: "Immunizations", label: "Immunizations", icon: Syringe },
+  { tab: "Programs", label: "Programs", icon: ListChecks },
+  { tab: "Billing", label: "Billing", icon: Banknote },
+  { tab: "Attachments", label: "Attachments", icon: Paperclip },
+  { tab: "Timeline", label: "Timeline", icon: FileClock },
+  { tab: "Visits", label: "Visits", icon: HistoryIcon },
+  { tab: "Care", label: "Care", icon: Beaker },
+] satisfies NavItemSpec[];
+
+const ALL_NAV_ITEMS = [...PRIMARY_NAV_GROUPS.flatMap((group) => group.items), ...MORE_NAV_ITEMS];
+const TABS = ALL_NAV_ITEMS.map((item) => item.tab);
+type Tab = (typeof ALL_NAV_ITEMS)[number]["tab"];
+type NavCounts = Partial<Record<Tab, number>>;
+const PATIENT_NAV_MORE_STORAGE_KEY = "er-system.patient-chart.more-expanded";
 
 const ESI_DESCRIPTIONS: Record<EsiLevel, string> = {
   1: "Immediate life-saving intervention required",
@@ -194,17 +204,9 @@ const ESI_DESCRIPTIONS: Record<EsiLevel, string> = {
   5: "No resources needed, stable",
 };
 
-const ESI_SHORT_LABELS: Record<EsiLevel, string> = {
-  1: "Immediate",
-  2: "High risk",
-  3: "Multiple resources",
-  4: "One resource",
-  5: "No resources",
-};
-
 export function PatientChart() {
   const { encounterId } = useParams<{ encounterId: string }>();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const view = useEncounterView(encounterId);
   const requestedTab = searchParams.get("tab");
   const [tab, setTab] = useState<Tab>(TABS.includes(requestedTab as Tab) ? requestedTab as Tab : "Overview");
@@ -216,7 +218,14 @@ export function PatientChart() {
   const [personalDirty, setPersonalDirty] = useState(false);
   const moreMenuRef = useRef<HTMLDivElement>(null);
   const mobileNavCloseRef = useRef<HTMLButtonElement>(null);
+  const zones = useZones();
   const vitalsSets = useVitalsSets(encounterId);
+  const medications = useMedications(view?.patient.id);
+  const orders = useOrderRecords(encounterId);
+  const navCounts: NavCounts = {
+    Medications: medications.length,
+    Orders: orders.length,
+  };
 
   useEffect(() => {
     if (!moreOpen) return;
@@ -249,12 +258,21 @@ export function PatientChart() {
     };
   }, [navOpen]);
 
+  useEffect(() => {
+    if (!TABS.includes(requestedTab as Tab)) return;
+    if (requestedTab !== tab) setTab(requestedTab as Tab);
+  }, [requestedTab, tab]);
+
   if (!view) {
     return <div className="p-3 text-sm text-[var(--color-ink-secondary)]">Patient not found.</div>;
   }
 
   const { patient, encounter, triage } = view;
   const currentVitals = latestVitals(vitalsSets);
+  const currentZoneName = encounter.currentZone ? zones.find((zone) => zone.id === encounter.currentZone)?.name : null;
+  const roomLabel = encounter.currentLocationName
+    ? `${encounter.currentLocationName}${currentZoneName ? ` | ${currentZoneName}` : ""}`
+    : "Room unassigned";
   const initials = (patient.name ?? patient.displayNumber)
     .split(" ")
     .map((p) => p[0])
@@ -266,10 +284,6 @@ export function PatientChart() {
     : patient.ageValue != null
       ? `${patient.ageValue} ${patient.ageUnit ?? "years"}`
       : patient.estimatedAgeRange ?? "Age unknown";
-  const dateOfBirth = patient.dateOfBirth
-    ? new Date(`${patient.dateOfBirth}T00:00:00`).toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" })
-    : null;
-
   function openTab(nextTab: Tab) {
     if (nextTab !== tab && tab === "Personal" && personalDirty) {
       const leave = window.confirm("Discard unsaved patient information changes?");
@@ -277,18 +291,21 @@ export function PatientChart() {
       setPersonalDirty(false);
     }
     setTab(nextTab);
+    const nextSearchParams = new URLSearchParams(searchParams);
+    nextSearchParams.set("tab", nextTab);
+    setSearchParams(nextSearchParams);
     setNavOpen(false);
   }
 
   return (
     <div className="patient-chart-shell">
       <aside className="patient-chart-sidebar" aria-label="Patient chart navigation">
-        <PatientNavigation activeTab={tab} onSelect={openTab} />
+        <PatientNavigation activeTab={tab} counts={navCounts} onSelect={openTab} />
       </aside>
 
       <div className="min-w-0">
         <header className="patient-identity-header">
-          <div className="mb-2 hidden items-center gap-2 max-[1099px]:flex">
+          <div className="mb-2 hidden items-center gap-2 max-[899px]:flex">
             <button
               type="button"
               onClick={() => setNavOpen(true)}
@@ -299,53 +316,41 @@ export function PatientChart() {
             </button>
           </div>
 
-          <div className="flex min-w-0 flex-wrap items-start gap-3">
-            <div
-              className="flex h-14 w-14 shrink-0 items-center justify-center rounded-md bg-[var(--color-primary-tint)] text-xl font-bold text-[var(--color-primary)]"
-              aria-hidden="true"
-            >
-              {initials}
-            </div>
-
-            <div className="min-w-[240px] flex-1">
-              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                <h1 className="break-words text-2xl font-semibold">{patient.name ?? "Unknown patient"}</h1>
-                <span className="text-sm font-medium capitalize text-[var(--color-ink-secondary)]">{patient.sex ?? "sex unknown"}</span>
-              </div>
-              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-sm text-[var(--color-ink-secondary)]">
-                <span className="font-medium text-[var(--color-ink)]">{patientAge}</span>
-                {dateOfBirth && <span className="inline-flex items-center gap-1"><CalendarDays size={14} /> DOB {dateOfBirth}</span>}
-                <span className="font-semibold text-[var(--color-primary)]">MRN {patient.mrn ?? patient.displayNumber}</span>
-                <span className="font-medium text-[var(--color-ink)]">Case {encounter.caseNumber ?? encounter.id.slice(0, 8)}</span>
+          <div className="patient-summary-header-row">
+            <div className="patient-summary-identity">
+              <div className="patient-summary-avatar" aria-hidden="true">{initials}</div>
+              <div className="min-w-0">
+                <h1 title={patient.name ?? "Unknown patient"}>{patient.name ?? "Unknown patient"}</h1>
+                <div className="patient-summary-meta">
+                  <span title={`${patientAge} | ${patient.sex ?? "unknown sex"}`}>{patientAge} | {patient.sex ?? "unknown sex"}</span>
+                  <span title={`MRN ${patient.mrn ?? patient.displayNumber}`}>MRN {patient.mrn ?? patient.displayNumber}</span>
+                  <span title={`Case ${encounter.caseNumber ?? encounter.id.slice(0, 8)}`}>Case {encounter.caseNumber ?? encounter.id.slice(0, 8)}</span>
+                </div>
               </div>
             </div>
 
-            <div className="flex max-w-[440px] flex-wrap items-center gap-2 max-[720px]:w-full max-[720px]:max-w-none">
-              <span className="rounded bg-[var(--color-primary-tint)] px-2 py-1 text-sm font-semibold text-[var(--color-primary)]">
-                {encounter.closedAt ? "Visit closed" : "Active visit"}
-              </span>
-              <span className="rounded bg-[var(--color-surface-muted)] px-2 py-1 text-sm font-medium capitalize text-[var(--color-ink-secondary)]">
-                {encounter.state.replace(/_/g, " ")}
-              </span>
-              <span className="rounded bg-[var(--color-surface-muted)] px-2 py-1 text-sm font-medium capitalize text-[var(--color-ink-secondary)]">
-                {(encounter.pathway ?? "standard").replace(/_/g, " ")} pathway
-              </span>
-              <span className={`inline-flex items-center gap-1 text-sm font-semibold ${encounter.currentLocationName ? "text-[var(--color-primary)]" : "text-[var(--color-yellow-text)]"}`}>
-                <MapPin size={15} /> {encounter.currentLocationName ?? "Location unassigned"}
-              </span>
+            <div className="patient-status-chips">
+              <button
+                type="button"
+                className={`patient-status-chip patient-room-chip ${encounter.currentLocationName ? "patient-room-chip-assigned" : "patient-room-chip-warning"}`}
+                onClick={() => openTab("Triage")}
+                title={encounter.currentLocationName ? `Current room: ${roomLabel}` : "Assign room from triage"}
+              >
+                <MapPin size={15} />
+                <span>Room</span>
+                <strong>{roomLabel}</strong>
+              </button>
               {patient.registrationComplete === false && (
-                <button
-                  className="inline-flex items-center gap-1 rounded bg-[var(--color-yellow-tint)] px-2 py-1 text-sm font-semibold text-[var(--color-yellow-text)]"
-                  onClick={() => openTab("Personal")}
-                >
-                  <Clock3 size={14} /> Registration incomplete
+                <button type="button" className="patient-status-chip patient-status-chip-warning" onClick={() => openTab("Personal")}>
+                  <Clock3 size={13} /> Registration incomplete
                 </button>
               )}
+              {encounter.closedAt && <span className="patient-status-chip">Visit closed</span>}
             </div>
 
-            <div className="ml-auto flex shrink-0 items-center gap-1 max-[720px]:ml-0">
+            <div className="patient-header-actions">
               <button
-                className="inline-flex min-h-10 items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 text-sm font-semibold hover:bg-[var(--color-surface-muted)]"
+                className="patient-header-button"
                 onClick={() => setIdentityOpen(true)}
               >
                 <QrCode size={16} /> Patient ID
@@ -357,7 +362,7 @@ export function PatientChart() {
                   aria-haspopup="true"
                   aria-expanded={moreOpen}
                   onClick={() => setMoreOpen((value) => !value)}
-                  className="flex h-10 w-10 items-center justify-center rounded-md border border-[var(--color-border)] text-[var(--color-ink-secondary)] hover:bg-[var(--color-surface-muted)] hover:text-[var(--color-ink)]"
+                  className="patient-header-icon-button"
                 >
                   <MoreVertical size={18} />
                 </button>
@@ -379,43 +384,54 @@ export function PatientChart() {
                   </div>
                 )}
               </div>
-            </div>
-          </div>
-
-          <div className="mt-3 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 border-t border-[var(--color-border)] pt-3">
-            <div className="inline-flex min-h-9 items-center gap-1.5 text-sm max-[720px]:order-3">
-              <UserRoundCheck size={16} className="text-[var(--color-primary)]" />
-              <span className="text-[var(--color-ink-secondary)]">Provider</span>
-              <strong>{encounter.currentProvider ?? "Unassigned"}</strong>
-              {encounter.assignedNurse && <span className="text-[var(--color-ink-secondary)]">| Nurse {encounter.assignedNurse}</span>}
-            </div>
-            <div className="max-[720px]:order-1"><TriageBadge level={triage} size="sm" /></div>
-            <VitalsHeader sets={vitalsSets} triage={triage} />
-            <AllergiesBanner encounterId={encounter.id} encounter={encounter} />
-            <div className="ml-auto flex shrink-0 items-center gap-2 max-[720px]:order-4 max-[720px]:ml-0">
               <button
                 type="button"
                 onClick={() => setRetriageOpen(true)}
-                className="min-h-10 rounded-md border border-[var(--color-border)] px-3 text-sm font-semibold hover:bg-[var(--color-surface-muted)]"
+                className="patient-header-button"
               >
                 Re-triage
               </button>
               <button
                 type="button"
-                className="min-h-10 rounded-md bg-[var(--color-primary)] px-3 text-sm font-semibold text-white hover:bg-[var(--color-primary-dark)]"
+                className="patient-header-primary"
                 onClick={() => openTab("Disposition")}
               >
                 Disposition
               </button>
             </div>
           </div>
-          <News2Banner latest={currentVitals} onRetriage={() => setRetriageOpen(true)} />
+
+          <div className="patient-clinical-strip">
+            <HeaderDatum label="Status" value={workflowStatusForEncounter(encounter).replace(/_/g, " ").toLowerCase()} />
+            <ChiefComplaintDatum encounterId={encounter.id} value={encounter.chiefComplaint} />
+            <HeaderDatum label="Provider" value={encounter.currentProvider ?? "Unassigned"} title={encounter.assignedNurse ? `Nurse ${encounter.assignedNurse}` : undefined} />
+            <EsiHeaderDatum level={triage} />
+            <AllergiesHeaderDatum encounterId={encounter.id} encounter={encounter} />
+            {/* On the Vitals tab the console tiles + NEWS2 chip are the live
+                current values, so this read-only vitals readout would duplicate
+                them (and NEWS2 would appear twice). Show it only elsewhere. */}
+            {tab !== "Vitals" && (
+              <>
+                <HeaderDatum label="Temp" value={formatHeaderVital(currentVitals?.temperature, "C")} tone={headerVitalTone("temperature", currentVitals?.temperature)} icon={Thermometer} compactLabel />
+                <HeaderDatum label="HR" value={formatHeaderVital(currentVitals?.heartRate, "bpm")} tone={headerVitalTone("heartRate", currentVitals?.heartRate)} icon={HeartPulse} compactLabel />
+                <HeaderDatum label="BP" value={formatHeaderBp(currentVitals?.systolicBp, currentVitals?.diastolicBp)} tone={headerVitalTone("systolicBp", currentVitals?.systolicBp)} icon={Activity} compactLabel />
+                <HeaderDatum label="SpO2" value={formatHeaderVital(currentVitals?.spo2, "%")} tone={headerVitalTone("spo2", currentVitals?.spo2)} icon={Droplets} compactLabel />
+                <HeaderDatum label="RR" value={formatHeaderVital(currentVitals?.respiratoryRate, "/min")} tone={headerVitalTone("respiratoryRate", currentVitals?.respiratoryRate)} icon={Wind} compactLabel />
+                <HeaderDatum label="Pain" value={formatHeaderVital(currentVitals?.painScore, "/10")} tone={headerVitalTone("painScore", currentVitals?.painScore)} icon={ShieldAlert} compactLabel />
+                <News2HeaderDatum score={currentVitals?.news2 ?? null} />
+                <HeaderDatum label="Last" value={currentVitals ? new Date(currentVitals.recordedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "\u2014"} icon={Clock3} compactLabel />
+              </>
+            )}
+          </div>
+          {/* The Vitals tab surfaces the advisory as a slim strip on its NEWS2
+              chip; elsewhere keep the header banner. */}
+          {tab !== "Vitals" && tab !== "Triage" && <News2Banner latest={currentVitals} onRetriage={() => setRetriageOpen(true)} />}
         </header>
 
         <main className="patient-chart-workspace">
           {tab === "Overview" && <OverviewTab encounterId={encounter.id} patientId={patient.id} onOpenTab={openTab} />}
           {tab === "Personal" && <PersonalTab encounterId={encounter.id} patientId={patient.id} onDirtyChange={setPersonalDirty} />}
-          {tab === "Vitals" && <VitalsTab encounterId={encounter.id} sets={vitalsSets} />}
+          {tab === "Vitals" && <VitalsTab encounterId={encounter.id} sets={vitalsSets} onRetriage={() => setRetriageOpen(true)} />}
           {tab === "Medications" && <MedicationsTab patientId={patient.id} encounterId={encounter.id} />}
           {tab === "Conditions" && <ConditionsTab patientId={patient.id} encounterId={encounter.id} />}
           {tab === "Orders" && <OrdersTab patientId={patient.id} encounterId={encounter.id} />}
@@ -427,7 +443,7 @@ export function PatientChart() {
           {tab === "Attachments" && <AttachmentsTab patientId={patient.id} encounterId={encounter.id} />}
           {tab === "Assessment" && <AssessmentWorkflow encounterId={encounter.id} />}
           {tab === "Care" && <CareWorkflow encounterId={encounter.id} />}
-          {tab === "Triage" && <TriageTab encounterId={encounter.id} currentLevel={triage} latest={latestVitals(vitalsSets)} />}
+          {tab === "Triage" && <TriageTab encounterId={encounter.id} currentLevel={triage} latest={latestVitals(vitalsSets)} onOpenTab={openTab} />}
           {tab === "Disposition" && <DispositionWorkflow encounterId={encounter.id} />}
           {tab === "Notes" && <NotesTab encounterId={encounter.id} />}
           {tab === "Timeline" && <PatientJourney encounterId={encounter.id} />}
@@ -437,7 +453,7 @@ export function PatientChart() {
       </div>
 
       {navOpen && (
-        <div className="fixed inset-x-0 bottom-0 top-[var(--app-header-height)] z-[70] min-[1100px]:hidden" role="dialog" aria-modal="true" aria-label="Patient chart navigation">
+        <div className="fixed inset-x-0 bottom-0 top-[var(--app-header-height)] z-[70] min-[900px]:hidden" role="dialog" aria-modal="true" aria-label="Patient chart navigation">
           <button type="button" className="absolute inset-0 bg-black/40" onClick={() => setNavOpen(false)} aria-label="Close patient navigation" />
           <aside className="relative h-full w-[min(88vw,330px)] overflow-y-auto border-r border-[var(--color-border)] bg-[var(--color-surface)] shadow-xl">
             <div className="sticky top-0 z-10 flex min-h-14 items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-surface)] px-4">
@@ -452,7 +468,7 @@ export function PatientChart() {
                 <CloseIcon size={19} />
               </button>
             </div>
-            <PatientNavigation activeTab={tab} onSelect={openTab} />
+            <PatientNavigation activeTab={tab} counts={navCounts} onSelect={openTab} />
           </aside>
         </div>
       )}
@@ -477,38 +493,283 @@ export function PatientChart() {
   );
 }
 
-function PatientNavigation({ activeTab, onSelect }: { activeTab: Tab; onSelect: (tab: Tab) => void }) {
+function PatientNavigation({ activeTab, counts, onSelect }: { activeTab: Tab; counts: NavCounts; onSelect: (tab: Tab) => void }) {
+  const [moreExpanded, setMoreExpanded] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(PATIENT_NAV_MORE_STORAGE_KEY) === "true";
+  });
+  const activeInMore = MORE_NAV_ITEMS.some((item) => item.tab === activeTab);
+
+  useEffect(() => {
+    if (activeInMore) setMoreExpanded(true);
+  }, [activeInMore]);
+
+  useEffect(() => {
+    window.localStorage.setItem(PATIENT_NAV_MORE_STORAGE_KEY, String(moreExpanded));
+  }, [moreExpanded]);
+
   return (
-    <nav aria-label="Patient chart sections" className="space-y-4 py-3">
-      {NAV_GROUPS.map((group) => (
+    <nav aria-label="Patient chart sections" className="patient-chart-nav">
+      {PRIMARY_NAV_GROUPS.map((group) => (
         <div key={group.label}>
-          <div className="mb-1 px-4 text-xs font-bold uppercase text-[var(--color-ink-secondary)]">{group.label}</div>
-          <div>
-            {group.items.map(({ tab: itemTab, label, icon: Icon }) => (
-              <button
-                key={itemTab}
-                type="button"
-                aria-current={activeTab === itemTab ? "page" : undefined}
-                onClick={() => onSelect(itemTab)}
-                className={`flex min-h-10 w-full items-center gap-2.5 border-l-[3px] px-4 text-left text-sm ${
-                  activeTab === itemTab
-                    ? "border-[var(--color-primary)] bg-[var(--color-primary)] font-semibold text-white"
-                    : "border-transparent text-[var(--color-ink-secondary)] hover:bg-[var(--color-surface-muted)] hover:text-[var(--color-ink)]"
-                }`}
-              >
-                <Icon size={17} className="shrink-0" />
-                <span>{label}</span>
-              </button>
+          <div className="patient-chart-nav-label">{group.label}</div>
+          <div className="patient-chart-nav-list">
+            {group.items.map((item) => (
+              <PatientNavLink
+                key={item.tab}
+                item={item}
+                active={activeTab === item.tab}
+                count={counts[item.tab]}
+                onSelect={onSelect}
+              />
             ))}
           </div>
         </div>
       ))}
+      <div className="patient-chart-nav-more">
+        <button
+          type="button"
+          aria-expanded={moreExpanded}
+          onClick={() => setMoreExpanded((expanded) => !expanded)}
+          className="patient-chart-nav-more-toggle"
+          title={`More (${MORE_NAV_ITEMS.length})`}
+        >
+          <ChevronDown size={16} className={`patient-chart-nav-more-icon ${moreExpanded ? "rotate-180" : ""}`} aria-hidden="true" />
+          <span className="patient-chart-nav-text">More ({MORE_NAV_ITEMS.length})</span>
+          <span className="patient-chart-nav-rail-tip">More</span>
+        </button>
+        {moreExpanded && (
+          <div className="patient-chart-nav-list patient-chart-nav-overflow">
+            {MORE_NAV_ITEMS.map((item) => (
+              <PatientNavLink
+                key={item.tab}
+                item={item}
+                active={activeTab === item.tab}
+                count={counts[item.tab]}
+                onSelect={onSelect}
+              />
+            ))}
+          </div>
+        )}
+      </div>
     </nav>
   );
 }
 
+function PatientNavLink({
+  item,
+  active,
+  count,
+  onSelect,
+}: {
+  item: NavItemSpec & { tab: Tab };
+  active: boolean;
+  count?: number;
+  onSelect: (tab: Tab) => void;
+}) {
+  const Icon = item.icon;
+  const badge = item.badgeLabel && count !== undefined ? `${item.badgeLabel} ${count}` : null;
+
+  return (
+    <a
+      href={`?tab=${encodeURIComponent(item.tab)}`}
+      aria-current={active ? "page" : undefined}
+      title={item.label}
+      onClick={(event) => {
+        event.preventDefault();
+        onSelect(item.tab);
+      }}
+      className={`patient-chart-nav-item ${active ? "patient-chart-nav-item-active" : ""}`}
+    >
+      <Icon size={16} className="patient-chart-nav-icon" aria-hidden="true" />
+      <span className="patient-chart-nav-text">{item.label}</span>
+      {badge && <span className="patient-chart-nav-badge">{badge}</span>}
+    </a>
+  );
+}
+
+function HeaderDatum({
+  label,
+  value,
+  tone,
+  title,
+  icon: Icon,
+  compactLabel,
+}: {
+  label: string;
+  value: string | number;
+  tone?: "warning" | "critical";
+  title?: string;
+  icon?: NavIcon;
+  compactLabel?: boolean;
+}) {
+  const fullTitle = title ?? `${label}: ${String(value)}`;
+  return (
+    <div className={`patient-clinical-datum ${tone ? `patient-clinical-datum-${tone}` : ""}`} title={fullTitle}>
+      <span className={compactLabel ? "patient-clinical-datum-label patient-clinical-datum-label-icon" : "patient-clinical-datum-label"} title={label} aria-label={label}>
+        {Icon && <Icon size={14} aria-hidden="true" />}
+        {label}
+      </span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function EsiHeaderDatum({ level }: { level: TriageLevel | null }) {
+  return (
+    <div className="patient-clinical-datum patient-clinical-datum-esi" title={`ESI: ${level ?? "not triaged"}`}>
+      <span className="patient-clinical-datum-label">ESI</span>
+      <TriageBadge level={level} size="sm" />
+    </div>
+  );
+}
+
+function News2HeaderDatum({ score }: { score: number | null }) {
+  const band = score == null ? "empty" : score >= 7 ? "critical" : score >= 5 ? "warning" : "normal";
+  return (
+    <div className={`patient-clinical-datum patient-clinical-datum-news2 patient-clinical-datum-news2-${band}`} title={`NEWS2: ${score ?? "not recorded"}`}>
+      <span className="patient-clinical-datum-label patient-clinical-datum-label-icon">
+        <Activity size={14} aria-hidden="true" /> NEWS2
+      </span>
+      <strong>{score ?? "\u2014"}</strong>
+    </div>
+  );
+}
+
+function ChiefComplaintDatum({ encounterId, value }: { encounterId: string; value: string | null }) {
+  const mode = useAppStore((s) => s.mode);
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(value ?? "");
+  const displayValue = value?.trim() || "Add chief complaint";
+
+  useEffect(() => {
+    if (!open) setDraft(value ?? "");
+  }, [open, value]);
+
+  async function save() {
+    await updateEncounterField(encounterId, "chiefComplaint", draft.trim() || null, mode);
+    setOpen(false);
+  }
+
+  return (
+    <div className={`patient-clinical-datum patient-clinical-datum-editable patient-clinical-datum-wide ${value ? "" : "patient-clinical-datum-empty"}`} title={`Chief complaint: ${displayValue}`}>
+      <span className="patient-clinical-datum-label" title="Chief complaint">
+        <MessageSquareWarning size={14} aria-hidden="true" /> Chief complaint
+      </span>
+      <div className="patient-clinical-datum-value-row">
+        <strong>{displayValue}</strong>
+        <button type="button" className="patient-clinical-datum-action" onClick={() => setOpen((current) => !current)} aria-label={value ? "Edit chief complaint" : "Add chief complaint"} aria-expanded={open}>
+          {value ? <Edit3 size={13} /> : <Plus size={13} />}
+        </button>
+      </div>
+      {open && (
+        <div className="patient-clinical-popover">
+          <label>
+            <span>Chief complaint</span>
+            <textarea value={draft} onChange={(event) => setDraft(event.target.value)} rows={3} placeholder="Describe complaint, symptom, or concern" />
+          </label>
+          <div className="patient-clinical-popover-actions">
+            <button type="button" onClick={() => setOpen(false)}>Cancel</button>
+            <button type="button" className="patient-clinical-popover-primary" onClick={() => void save()}>Save</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AllergiesHeaderDatum({ encounterId, encounter }: { encounterId: string; encounter: Encounter }) {
+  const mode = useAppStore((s) => s.mode);
+  const records = useAllergyRecords(encounterId);
+  const activeRecords = records.filter((record) => record.status === "active");
+  const structured = new Set(records.map((record) => record.substance));
+  const legacyAllergies = encounter.allergies.filter((allergy) => !structured.has(allergy));
+  const allergyLabels = [
+    ...activeRecords.map((record) => record.reaction ? `${record.substance} - ${record.reaction}` : record.substance),
+    ...legacyAllergies,
+  ];
+  const summary = allergyLabels.length ? allergyLabels.join("; ") : "None known";
+  const [open, setOpen] = useState(false);
+  const [substance, setSubstance] = useState("");
+  const [reaction, setReaction] = useState("");
+  const [severity, setSeverity] = useState<AllergySeverity>("moderate");
+
+  async function add() {
+    const value = substance.trim();
+    if (!value) return;
+    await addAllergyRecord(
+      {
+        encounterId,
+        patientId: encounter.patientId,
+        substance: value,
+        reaction: reaction.trim() || null,
+        severity,
+        status: "active",
+        actor: encounter.currentProvider ?? "Triage nurse",
+      },
+      mode,
+    );
+    setSubstance("");
+    setReaction("");
+    setSeverity("moderate");
+    setOpen(false);
+  }
+
+  return (
+    <div className={`patient-clinical-datum patient-clinical-datum-editable patient-clinical-datum-wide ${allergyLabels.length ? "patient-clinical-datum-critical" : ""}`} title={`Allergies: ${summary}`}>
+      <span className="patient-clinical-datum-label" title="Allergies">
+        <ShieldAlert size={14} aria-hidden="true" /> Allergies
+      </span>
+      <div className="patient-clinical-datum-value-row">
+        <strong>{summary}</strong>
+        <button type="button" className="patient-clinical-datum-action" onClick={() => setOpen((current) => !current)} aria-label="Add allergy" aria-expanded={open}>
+          <Plus size={13} />
+        </button>
+      </div>
+      {open && (
+        <div className="patient-clinical-popover patient-clinical-popover-allergy">
+          <label>
+            <span>Allergy</span>
+            <SuggestionInput value={substance} suggestions={ALLERGY_OPTIONS} placeholder="Search or enter allergy" onChange={setSubstance} onSubmit={() => void add()} />
+          </label>
+          <label>
+            <span>Reaction</span>
+            <input value={reaction} onChange={(event) => setReaction(event.target.value)} placeholder="e.g. urticaria, anaphylaxis" />
+          </label>
+          <label>
+            <span>Severity</span>
+            <DropdownSelect value={severity} options={["mild", "moderate", "severe"]} onChange={(next) => setSeverity(next as AllergySeverity)} className="patient-clinical-popover-select" ariaLabel="Allergy severity" />
+          </label>
+          <div className="patient-clinical-popover-actions">
+            <button type="button" onClick={() => setOpen(false)}>Cancel</button>
+            <button type="button" className="patient-clinical-popover-primary patient-clinical-popover-danger" onClick={() => void add()} disabled={!substance.trim()}>Add allergy</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatHeaderVital(value: number | null | undefined, unit: string) {
+  if (value === null || value === undefined) return "\u2014";
+  return unit === "%" ? `${value}%` : `${value} ${unit}`;
+}
+
+function formatHeaderBp(systolic: number | null | undefined, diastolic: number | null | undefined) {
+  if (systolic == null && diastolic == null) return "\u2014";
+  return `${systolic ?? "\u2014"}/${diastolic ?? "\u2014"} mmHg`;
+}
+
+function headerVitalTone(parameter: string, value: number | null | undefined): "warning" | "critical" | undefined {
+  if (value === null || value === undefined) return undefined;
+  const band = bandFor(parameter, value);
+  if (band === "red") return "critical";
+  if (band === "amber") return "warning";
+  return undefined;
+}
+
 function labelForTab(tab: Tab) {
-  return NAV_GROUPS.flatMap((group) => group.items).find((item) => item.tab === tab)?.label ?? tab;
+  return ALL_NAV_ITEMS.find((item) => item.tab === tab)?.label ?? tab;
 }
 
 function ageFromDob(dob: string): number {
@@ -524,12 +785,9 @@ const PATIENT_DETAILS_SECTIONS = [
   "Identity",
   "Contact & Address",
   "Family & Emergency",
-  "Insurance",
-  "Civil Registry & IDs",
-  "Employment",
-  "Military",
-  "Registrations",
-  "Pending Cases",
+  "Insurance & IDs",
+  "Work",
+  "History",
 ] as const;
 type PatientDetailsSection = (typeof PATIENT_DETAILS_SECTIONS)[number];
 
@@ -910,9 +1168,11 @@ function PersonalTab({
       )}
 
       {detailsSection === "Family & Emergency" && <RelatedPersonsSection patientId={patientId} mode={mode} readOnly={!editing} />}
-      {detailsSection === "Insurance" && <InsurancePoliciesSection patientId={patientId} mode={mode} readOnly={!editing} />}
-      {detailsSection === "Civil Registry & IDs" && (
+
+      {detailsSection === "Insurance & IDs" && (
         <div className="space-y-3">
+          <InsurancePoliciesSection patientId={patientId} mode={mode} readOnly={!editing} />
+          <IdentifiersSection patientId={patientId} mode={mode} readOnly={!editing} />
           <section className="patient-profile-section">
             <h3 className="mb-2 text-sm font-semibold">Civil registry</h3>
             <div className="grid grid-cols-4 gap-3 max-[980px]:grid-cols-2 max-[560px]:grid-cols-1">
@@ -926,55 +1186,60 @@ function PersonalTab({
               <EditableField label="Registry notes" value={civilRegistry?.registryNotes ?? ""} onSave={(v) => upsertCivilRegistryRecord(patientId, { registryNotes: v || null }, mode)} />
             </div>
           </section>
-          <IdentifiersSection patientId={patientId} mode={mode} readOnly={!editing} />
         </div>
       )}
-      {detailsSection === "Employment" && (
-        <section className="patient-profile-section">
-          <h3 className="mb-2 text-sm font-semibold">Employment</h3>
-          <div className="grid grid-cols-4 gap-3 max-[980px]:grid-cols-2 max-[560px]:grid-cols-1">
-            <EditableField label="Occupation" value={employment?.occupation ?? ""} onSave={(v) => upsertEmploymentRecord(patientId, { occupation: v || null }, mode)} />
-            <SelectField label="Employment status" value={employment?.employmentStatus ?? ""} options={EMPLOYMENT_STATUS_OPTIONS} placeholder="Select status" onSave={(v) => upsertEmploymentRecord(patientId, { employmentStatus: v || null }, mode)} />
-            <EditableField label="Employer" value={employment?.employer ?? ""} onSave={(v) => upsertEmploymentRecord(patientId, { employer: v || null }, mode)} />
-            <EditableField label="Job title" value={employment?.jobTitle ?? ""} onSave={(v) => upsertEmploymentRecord(patientId, { jobTitle: v || null }, mode)} />
-            <EditableField label="Work phone" value={employment?.workPhone ?? ""} onSave={(v) => upsertEmploymentRecord(patientId, { workPhone: normalizePhone(v) || null }, mode)} />
-            <EditableField label="Work address" value={employment?.workAddress ?? ""} onSave={(v) => upsertEmploymentRecord(patientId, { workAddress: v || null }, mode)} />
-            <SelectField label="Industry" value={employment?.industry ?? ""} options={EMPLOYMENT_INDUSTRY_OPTIONS} placeholder="Select industry" onSave={(v) => upsertEmploymentRecord(patientId, { industry: v || null }, mode)} />
-            <EditableField label="Notes" value={employment?.notes ?? ""} onSave={(v) => upsertEmploymentRecord(patientId, { notes: v || null }, mode)} />
-          </div>
-        </section>
-      )}
-      {detailsSection === "Military" && (
-        <section className="patient-profile-section">
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <div>
-              <h3 className="text-sm font-semibold">Military / security information</h3>
-              <p className="text-sm text-[var(--color-ink-secondary)]">Optional sensitive section. Access control can be wired to a future auth layer.</p>
+
+      {detailsSection === "Work" && (
+        <div className="space-y-3">
+          <section className="patient-profile-section">
+            <h3 className="mb-2 text-sm font-semibold">Employment</h3>
+            <div className="grid grid-cols-4 gap-3 max-[980px]:grid-cols-2 max-[560px]:grid-cols-1">
+              <EditableField label="Occupation" value={employment?.occupation ?? ""} onSave={(v) => upsertEmploymentRecord(patientId, { occupation: v || null }, mode)} />
+              <SelectField label="Employment status" value={employment?.employmentStatus ?? ""} options={EMPLOYMENT_STATUS_OPTIONS} placeholder="Select status" onSave={(v) => upsertEmploymentRecord(patientId, { employmentStatus: v || null }, mode)} />
+              <EditableField label="Employer" value={employment?.employer ?? ""} onSave={(v) => upsertEmploymentRecord(patientId, { employer: v || null }, mode)} />
+              <EditableField label="Job title" value={employment?.jobTitle ?? ""} onSave={(v) => upsertEmploymentRecord(patientId, { jobTitle: v || null }, mode)} />
+              <EditableField label="Work phone" value={employment?.workPhone ?? ""} onSave={(v) => upsertEmploymentRecord(patientId, { workPhone: normalizePhone(v) || null }, mode)} />
+              <EditableField label="Work address" value={employment?.workAddress ?? ""} onSave={(v) => upsertEmploymentRecord(patientId, { workAddress: v || null }, mode)} />
+              <SelectField label="Industry" value={employment?.industry ?? ""} options={EMPLOYMENT_INDUSTRY_OPTIONS} placeholder="Select industry" onSave={(v) => upsertEmploymentRecord(patientId, { industry: v || null }, mode)} />
+              <EditableField label="Notes" value={employment?.notes ?? ""} onSave={(v) => upsertEmploymentRecord(patientId, { notes: v || null }, mode)} />
             </div>
-            {editing && (
-              <button type="button" onClick={() => void upsertMilitaryRecord(patientId, { enabled: !militaryEnabled }, mode)} className="min-h-10 rounded-md border border-[var(--color-border)] px-3 text-sm font-semibold">
-                {militaryEnabled ? "Hide section" : "Enable section"}
-              </button>
+          </section>
+          <section className="patient-profile-section">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-semibold">Military / security information</h3>
+                <p className="text-sm text-[var(--color-ink-secondary)]">Optional sensitive section. Access control can be wired to a future auth layer.</p>
+              </div>
+              {editing && (
+                <button type="button" onClick={() => void upsertMilitaryRecord(patientId, { enabled: !militaryEnabled }, mode)} className="min-h-10 rounded-md border border-[var(--color-border)] px-3 text-sm font-semibold">
+                  {militaryEnabled ? "Hide section" : "Enable section"}
+                </button>
+              )}
+            </div>
+            {militaryEnabled ? (
+              <div className="grid grid-cols-3 gap-3 max-[860px]:grid-cols-2 max-[560px]:grid-cols-1">
+                <SelectField label="Institution" value={military?.institution ?? ""} options={MILITARY_INSTITUTION_OPTIONS} placeholder="Select institution" onSave={(v) => upsertMilitaryRecord(patientId, { institution: v || null, enabled: true }, mode)} />
+                <SelectField label="Section / department" value={military?.section ?? ""} options={MILITARY_SECTION_OPTIONS} placeholder="Select department" onSave={(v) => upsertMilitaryRecord(patientId, { section: v || null, enabled: true }, mode)} />
+                <SelectField label="Position or rank" value={military?.positionOrRank ?? ""} options={MILITARY_RANK_OPTIONS} placeholder="Select rank" onSave={(v) => upsertMilitaryRecord(patientId, { positionOrRank: v || null, enabled: true }, mode)} />
+                <EditableField label="Service number" value={military?.serviceNumber ?? ""} onSave={(v) => upsertMilitaryRecord(patientId, { serviceNumber: v || null, enabled: true }, mode)} />
+                <SelectField label="Zone" value={military?.zone ?? ""} options={MILITARY_ZONE_OPTIONS} placeholder="Select zone" onSave={(v) => upsertMilitaryRecord(patientId, { zone: v || null, enabled: true }, mode)} />
+                <EditableField label="Notes" value={military?.notes ?? ""} onSave={(v) => upsertMilitaryRecord(patientId, { notes: v || null, enabled: true }, mode)} />
+              </div>
+            ) : (
+              <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-ink-secondary)]">
+                No military or security affiliation recorded.
+              </div>
             )}
-          </div>
-          {militaryEnabled ? (
-            <div className="grid grid-cols-3 gap-3 max-[860px]:grid-cols-2 max-[560px]:grid-cols-1">
-              <SelectField label="Institution" value={military?.institution ?? ""} options={MILITARY_INSTITUTION_OPTIONS} placeholder="Select institution" onSave={(v) => upsertMilitaryRecord(patientId, { institution: v || null, enabled: true }, mode)} />
-              <SelectField label="Section / department" value={military?.section ?? ""} options={MILITARY_SECTION_OPTIONS} placeholder="Select department" onSave={(v) => upsertMilitaryRecord(patientId, { section: v || null, enabled: true }, mode)} />
-              <SelectField label="Position or rank" value={military?.positionOrRank ?? ""} options={MILITARY_RANK_OPTIONS} placeholder="Select rank" onSave={(v) => upsertMilitaryRecord(patientId, { positionOrRank: v || null, enabled: true }, mode)} />
-              <EditableField label="Service number" value={military?.serviceNumber ?? ""} onSave={(v) => upsertMilitaryRecord(patientId, { serviceNumber: v || null, enabled: true }, mode)} />
-              <SelectField label="Zone" value={military?.zone ?? ""} options={MILITARY_ZONE_OPTIONS} placeholder="Select zone" onSave={(v) => upsertMilitaryRecord(patientId, { zone: v || null, enabled: true }, mode)} />
-              <EditableField label="Notes" value={military?.notes ?? ""} onSave={(v) => upsertMilitaryRecord(patientId, { notes: v || null, enabled: true }, mode)} />
-            </div>
-          ) : (
-            <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-ink-secondary)]">
-              No military or security affiliation recorded.
-            </div>
-          )}
-        </section>
+          </section>
+        </div>
       )}
-      {detailsSection === "Registrations" && <PatientVisits patientId={patientId} currentEncounterId={encounterId} />}
-      {detailsSection === "Pending Cases" && <PendingCasesSection patientId={patientId} />}
+
+      {detailsSection === "History" && (
+        <div className="space-y-3">
+          <PatientVisits patientId={patientId} currentEncounterId={encounterId} />
+          <PendingCasesSection patientId={patientId} />
+        </div>
+      )}
 
       {patient.registrationComplete === false && (
         <button
@@ -1478,19 +1743,15 @@ function SelectField({
     <div className="min-w-0">
       <FieldLabel label={label} htmlFor={editing ? inputId : undefined} historyCount={fieldAudits.length} onHistory={historyField ? () => setHistoryOpen((open) => !open) : undefined} />
       {editing ? (
-        <select
+        <DropdownSelect
           id={inputId}
           value={currentValue}
-          onChange={(event) => setCurrentValue(event.target.value)}
+          onChange={setCurrentValue}
+          placeholder={placeholder}
+          options={selectOptions}
           className="min-h-10 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-input-bg)] px-2.5 text-sm capitalize outline-none"
-        >
-          {placeholder && <option value="">{placeholder}</option>}
-          {selectOptions.map((option) => (
-            <option key={option} value={option}>
-              {option.replace(/_/g, " ")}
-            </option>
-          ))}
-        </select>
+          ariaLabel={label}
+        />
       ) : (
         <div className="min-h-6 break-words text-sm font-medium capitalize">{currentValue ? currentValue.replace(/_/g, " ") : "—"}</div>
       )}
@@ -1499,326 +1760,375 @@ function SelectField({
   );
 }
 
-function VitalsTab({ encounterId, sets }: { encounterId: string; sets: ReturnType<typeof useVitalsSets> }) {
-  const [recording, setRecording] = useState(false);
-  return (
-    <div className="space-y-3">
-      <CurrentVitalsSummary sets={sets} recording={recording} onRecord={() => setRecording((open) => !open)} />
-      {recording && <VitalsCaptureForm encounterId={encounterId} source="full" onSaved={() => setRecording(false)} />}
-      <div id="vitals-history"><VitalsFlowsheet sets={sets} /></div>
-    </div>
-  );
+function VitalsTab({ encounterId, sets, onRetriage }: { encounterId: string; sets: ReturnType<typeof useVitalsSets>; onRetriage: () => void }) {
+  return <VitalsConsole encounterId={encounterId} sets={sets} onRetriage={onRetriage} />;
 }
 
 function TriageTab({
   encounterId,
   currentLevel,
   latest,
+  onOpenTab,
 }: {
   encounterId: string;
   currentLevel: EsiLevel | string | number | null;
   latest: ReturnType<typeof latestVitals>;
+  onOpenTab: (tab: Tab) => void;
 }) {
   const mode = useAppStore((s) => s.mode);
   const view = useEncounterView(encounterId);
+  const activeEncounters = useAllActiveEncounters();
   const beds = useBeds();
   const zones = useZones();
+  const triageAssessments = useTriageAssessments(encounterId);
   const levels: EsiLevel[] = [1, 2, 3, 4, 5];
-  const currentEsi: EsiLevel | null =
-    typeof currentLevel === "number" && levels.includes(currentLevel as EsiLevel) ? currentLevel as EsiLevel : null;
-  const availableBeds = beds.filter((bed) => !bed.encounterId);
+  const currentEsi: EsiLevel | null = typeof currentLevel === "number" && levels.includes(currentLevel as EsiLevel) ? currentLevel as EsiLevel : null;
   const zonesById = new Map(zones.map((zone) => [zone.id, zone]));
+  const encounterById = new Map(activeEncounters.map((row) => [row.encounter.id, row]));
 
-  // Bed and ESI selections are staged, not saved on click - the nurse must
-  // review and press Confirm before either is written.
+  const [pendingEsi, setPendingEsi] = useState<EsiLevel | null>(currentEsi);
   const [pendingBed, setPendingBed] = useState<{ id: string; name: string; zoneId: string } | null>(null);
-  const [pendingEsi, setPendingEsi] = useState<EsiLevel | null>(null);
-  const [savingBed, setSavingBed] = useState(false);
-  const [savingEsi, setSavingEsi] = useState(false);
-  const [vitalsOpen, setVitalsOpen] = useState(true);
+  const [manualPathway, setManualPathway] = useState(false);
+  const [pendingPathway, setPendingPathway] = useState<"fast_track" | "standard" | "critical" | null>(null);
   const [bedSearch, setBedSearch] = useState("");
   const [bedZoneFilter, setBedZoneFilter] = useState("all");
+  const [confirmError, setConfirmError] = useState<string | null>(null);
+  const [confirmedSummary, setConfirmedSummary] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [savingVitals, setSavingVitals] = useState(false);
+  const [vitalsSavedSummary, setVitalsSavedSummary] = useState<string | null>(null);
+  const [safetyConfirmed, setSafetyConfirmed] = useState(false);
+  const [vitals, setVitals] = useState<Record<QuickVitalKey, string>>(() => quickVitalsFromLatest(latest));
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const esiSectionRef = useRef<HTMLElement>(null);
+  const pathwaySectionRef = useRef<HTMLElement>(null);
+  const lastSavedVitalsSignatureRef = useRef<string | null>(latest ? quickVitalsSignature(quickVitalsFromLatest(latest)) : null);
 
-  const selectedEsi = pendingEsi ?? currentEsi;
-  const currentPathway = view?.encounter.pathway ?? "standard";
-  const currentLocation = view?.encounter.currentLocationName ?? "Unassigned";
-  const currentZoneName = view?.encounter.currentZone ? zonesById.get(view.encounter.currentZone)?.name : null;
-  const availableZoneIds = new Set(availableBeds.map((bed) => bed.zone));
-  const availableZones = zones.filter((zone) => availableZoneIds.has(zone.id));
+  useEffect(() => setPendingEsi(currentEsi), [currentEsi]);
+  useEffect(() => {
+    setVitals(quickVitalsFromLatest(latest));
+    lastSavedVitalsSignatureRef.current = latest ? quickVitalsSignature(quickVitalsFromLatest(latest)) : null;
+  }, [latest]);
+  if (!view) return null;
+
+  const { encounter } = view;
+  const suggestedPathway = pathwayForEsi(pendingEsi);
+  const selectedPathway = pendingPathway ?? (manualPathway ? null : suggestedPathway) ?? normalizePathway(encounter.pathway) ?? "standard";
+  const currentZoneName = encounter.currentZone ? zonesById.get(encounter.currentZone)?.name : null;
+  const pendingZoneName = pendingBed ? zonesById.get(pendingBed.zoneId)?.name ?? null : null;
+  const currentBedLabel = pendingBed ? `${pendingBed.name}${pendingZoneName ? ` | ${pendingZoneName}` : ""}` : encounter.currentLocationName ? `${encounter.currentLocationName}${currentZoneName ? ` | ${currentZoneName}` : ""}` : "Unassigned";
   const normalizedBedSearch = bedSearch.trim().toLowerCase();
-  const filteredBeds = availableBeds.filter((bed) => {
+  const zonesWithBeds = zones.filter((zone) => beds.some((bed) => bed.zone === zone.id));
+  const filteredBeds = beds.filter((bed) => {
     const zoneName = zonesById.get(bed.zone)?.name ?? "Unzoned";
     const matchesZone = bedZoneFilter === "all" || bed.zone === bedZoneFilter;
     const matchesSearch = !normalizedBedSearch || `${bed.name} ${bed.zone} ${zoneName}`.toLowerCase().includes(normalizedBedSearch);
     return matchesZone && matchesSearch;
   });
-  const triageVitalsFormId = `triage-vitals-${encounterId}`;
-  const pathways = [
-    { value: "fast_track" as const, label: "Fast-track", description: "Stable minor case", reason: "Low-risk patient assigned to fast-track" },
-    { value: "standard" as const, label: "Main ER", description: "Standard treatment queue", reason: "Moved to main ER pathway" },
-    { value: "critical" as const, label: "Resuscitation", description: "Immediate critical-care pathway", reason: "Deterioration: move to resuscitation" },
+  const visibleBeds = filteredBeds.slice(0, TRIAGE_VISIBLE_BED_LIMIT);
+  const hiddenBedCount = Math.max(filteredBeds.length - visibleBeds.length, 0);
+  const recordedVitals = QUICK_VITALS.filter((vital) => vitals[vital.key].trim() !== "").length;
+  const missingVitals = QUICK_VITALS.length - recordedVitals;
+  const abnormalVitals = QUICK_VITALS.filter((vital) => {
+    const parsed = parseQuickVital(vitals[vital.key]);
+    if (parsed === null) return false;
+    const band = bandFor(vital.parameter, parsed);
+    return band === "amber" || band === "red";
+  }).length;
+  const mismatch = (pendingEsi === 1 || pendingEsi === 2) && selectedPathway === "fast_track";
+  const latestAssessment = triageAssessments[0];
+  const tempSummary = vitals.temperature.trim() ? `Temp ${vitals.temperature} C` : "Temp missing";
+  const bedSummary = pendingBed?.name ?? encounter.currentLocationName ?? "No bed";
+  const summaryItems = [
+    { value: pendingEsi ? `ESI ${pendingEsi}` : "No ESI", className: pendingEsi ? `triage-summary-esi triage-summary-esi-${pendingEsi}` : "triage-summary-warning" },
+    { value: tempSummary, className: vitals.temperature.trim() ? "triage-summary-complete" : "triage-summary-warning" },
+    { value: missingVitals ? `${missingVitals} vitals missing` : "Vitals complete", className: missingVitals ? "triage-summary-warning" : "triage-summary-complete" },
+    { value: bedSummary, className: bedSummary === "No bed" ? "triage-summary-warning" : "triage-summary-complete" },
+    { value: pathwayLabel(selectedPathway), className: selectedPathway ? "triage-summary-complete" : "triage-summary-warning" },
   ];
+  const summaryText = summaryItems.map((item) => item.value).join(" | ");
 
-  async function confirmBed() {
-    if (!pendingBed) return;
-    setSavingBed(true);
+  async function saveQuickVitals(options: { quiet?: boolean } = {}) {
+    const parsedVitals = parseQuickVitals(vitals);
+    if (!hasQuickVitalsValues(parsedVitals)) {
+      if (!options.quiet) setVitalsSavedSummary("Enter at least one vital sign to save");
+      return false;
+    }
+    const signature = quickVitalsSignatureFromParsed(parsedVitals);
+    if (signature === lastSavedVitalsSignatureRef.current) {
+      if (!options.quiet) setVitalsSavedSummary("Vitals already current in the patient header");
+      return false;
+    }
+    setSavingVitals(true);
     try {
-      await assignLocation(encounterId, pendingBed.name, pendingBed.zoneId, mode);
-      const previousBeds = await db.beds.where("encounterId").equals(encounterId).toArray();
-      await Promise.all([
-        ...previousBeds.map((bed) => db.beds.update(bed.id, { encounterId: null })),
-        db.beds.update(pendingBed.id, { encounterId }),
-      ]);
-      setPendingBed(null);
+      const saved = await recordVitalsSet(encounterId, {
+        temperature: parsedVitals.temperature,
+        heartRate: parsedVitals.heartRate,
+        respiratoryRate: parsedVitals.respiratoryRate,
+        spo2: parsedVitals.spo2,
+        systolicBp: parsedVitals.systolicBp,
+        painScore: parsedVitals.painScore,
+        source: "triage",
+      }, mode);
+      lastSavedVitalsSignatureRef.current = signature;
+      setVitalsSavedSummary(`Vitals saved ${new Date(saved.recordedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`);
+      return true;
     } finally {
-      setSavingBed(false);
+      setSavingVitals(false);
     }
   }
 
-  async function confirmEsi() {
-    if (pendingEsi === null) return;
-    setSavingEsi(true);
+  async function confirmTriage() {
+    setConfirmedSummary(null);
+    if (pendingEsi === null) {
+      setConfirmError("Select an ESI level to confirm");
+      esiSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (!selectedPathway) {
+      setConfirmError("Select a pathway to confirm");
+      pathwaySectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (mismatch && !safetyConfirmed) {
+      setConfirmError("Confirm the Fast-track safety override before continuing");
+      pathwaySectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    setConfirmError(null);
+    setConfirming(true);
     try {
       await setTriage(encounterId, "esi", pendingEsi, mode);
-      setPendingEsi(null);
+      await saveQuickVitals({ quiet: true });
+      if (pendingBed) {
+        await assignLocation(encounterId, pendingBed.name, pendingBed.zoneId, mode);
+        const previousBeds = await db.beds.where("encounterId").equals(encounterId).toArray();
+        await Promise.all([...previousBeds.map((bed) => db.beds.update(bed.id, { encounterId: null })), db.beds.update(pendingBed.id, { encounterId })]);
+        setPendingBed(null);
+      }
+      await setEncounterPathway(encounterId, selectedPathway, mode, pathwayReason(selectedPathway), "Triage nurse");
+      setConfirmedSummary(`Triage confirmed at ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} | ${summaryText}`);
     } finally {
-      setSavingEsi(false);
+      setConfirming(false);
     }
   }
 
   return (
-    <div className="triage-workspace">
-      <section className="triage-section triage-section-primary">
-        <div className="flex flex-wrap items-center gap-2">
-          <h2 className="mr-auto text-sm font-semibold">ESI triage</h2>
-          <TriageVitalsAdvisory latest={latest} />
-        </div>
-
-        <div role="radiogroup" aria-label="ESI triage level" className="triage-esi-grid">
-          {levels.map((level, index) => {
-            const selected = selectedEsi === level;
-            const palette = triagePalette(level);
-            return (
-              <button
-                key={level}
-                type="button"
-                role="radio"
-                aria-checked={selected}
-                tabIndex={selected || (selectedEsi === null && index === 0) ? 0 : -1}
-                aria-label={`ESI ${level}: ${ESI_DESCRIPTIONS[level]}`}
-                title={ESI_DESCRIPTIONS[level]}
-                onClick={() => setPendingEsi(level)}
-                onKeyDown={(event) => {
-                  const previous = event.key === "ArrowLeft" || event.key === "ArrowUp";
-                  const next = event.key === "ArrowRight" || event.key === "ArrowDown";
-                  if (!previous && !next && event.key !== "Home" && event.key !== "End") return;
-                  event.preventDefault();
-                  const nextIndex = event.key === "Home"
-                    ? 0
-                    : event.key === "End"
-                      ? levels.length - 1
-                      : (index + (previous ? -1 : 1) + levels.length) % levels.length;
-                  setPendingEsi(levels[nextIndex]);
-                  const choices = event.currentTarget.parentElement?.children;
-                  window.setTimeout(() => (choices?.[nextIndex] as HTMLElement | undefined)?.focus(), 0);
-                }}
-                style={selected ? { borderColor: palette.solid, background: palette.tint } : undefined}
-                className="flex min-h-[52px] min-w-0 items-center gap-2 rounded-md border-2 border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-left hover:bg-[var(--color-surface-muted)]"
-              >
-                <span
-                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-base font-bold tabular-nums"
-                  style={selected ? { background: palette.solid, color: palette.textOnSolid } : { background: "var(--color-surface-muted)" }}
-                >
-                  {level}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block text-sm font-semibold">ESI {level}</span>
-                  <span className="block truncate text-xs text-[var(--color-ink-secondary)]">{ESI_SHORT_LABELS[level]}</span>
-                </span>
-                {selected && <CheckCircle2 size={16} className="shrink-0" style={{ color: palette.text }} />}
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="flex min-h-9 flex-wrap items-center gap-2 rounded-md bg-[var(--color-surface-muted)] px-2 py-1">
-          <span className="min-w-[240px] flex-1 truncate text-sm" aria-live="polite">
-            {selectedEsi ? (
-              <><strong>{pendingEsi !== null ? "Selected" : "Current"}: ESI {selectedEsi}</strong> - {ESI_DESCRIPTIONS[selectedEsi]}</>
-            ) : (
-              <span className="text-[var(--color-ink-secondary)]">Select an ESI level</span>
-            )}
-          </span>
-          {pendingEsi !== null && (
-            <button type="button" onClick={() => setPendingEsi(null)} className="min-h-9 px-2 text-xs font-semibold text-[var(--color-ink-secondary)] hover:text-[var(--color-ink)]">
-              Cancel
+    <div className="triage-flow">
+      <section className="triage-action-tabs">
+        <div className="triage-quick-actions">
+          {TRIAGE_DRAWERS.map((drawer) => (
+            <button key={drawer.key} type="button" onClick={() => onOpenTab(drawer.tab)} className="triage-chip-button" title={`Open ${drawer.label}`}>
+              <drawer.icon size={14} /> {drawer.label}
             </button>
-          )}
-          <button type="button" disabled={pendingEsi === null || savingEsi} onClick={() => void confirmEsi()} className="min-h-9 rounded-md bg-[var(--color-primary)] px-3 text-xs font-semibold text-white disabled:opacity-45">
-            {savingEsi ? "Saving..." : "Confirm triage"}
-          </button>
+          ))}
         </div>
       </section>
 
-      <section className="triage-section">
-        <div className="flex flex-wrap items-center gap-2">
-          <button type="button" aria-expanded={vitalsOpen} onClick={() => setVitalsOpen((open) => !open)} className="inline-flex min-h-9 items-center gap-1.5 text-sm font-semibold">
-            <ChevronDown size={15} className={`transition-transform ${vitalsOpen ? "rotate-180" : ""}`} />
-            Record vitals
-          </button>
-          <span className="mr-auto text-xs text-[var(--color-ink-secondary)]">
-            {latest ? `Last recorded ${new Date(latest.recordedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "No vitals recorded"}
-          </span>
-          {vitalsOpen && (
-            <button type="submit" form={triageVitalsFormId} className="inline-flex min-h-9 items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 text-xs font-semibold text-white">
-              <Save size={14} /> Save vitals
-            </button>
-          )}
-        </div>
-        {vitalsOpen && (
-          <div className="mt-2 border-t border-[var(--color-border)] pt-2">
-            <VitalsCaptureForm encounterId={encounterId} source="triage" embedded formId={triageVitalsFormId} showSaveButton={false} />
-          </div>
-        )}
-      </section>
-
-      <section className="triage-section">
-        <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-sm font-semibold">Room / bed</h2>
-          <span className="text-xs font-bold text-[var(--color-green-text)]">{availableBeds.length} open</span>
-          <span className="mr-auto text-xs text-[var(--color-ink-secondary)]" aria-live="polite">
-            Current: <strong className="text-[var(--color-ink)]">{currentLocation}{currentZoneName ? ` · ${currentZoneName}` : ""}</strong>
-          </span>
-          {pendingBed && (
-            <>
-              <span className="text-xs font-semibold text-[var(--color-primary)]">Selected: {pendingBed.name}</span>
-              <button type="button" onClick={() => setPendingBed(null)} className="min-h-9 px-2 text-xs font-semibold text-[var(--color-ink-secondary)]">
-                Cancel
-              </button>
-              <button type="button" disabled={savingBed} onClick={() => void confirmBed()} className="min-h-9 rounded-md bg-[var(--color-primary)] px-3 text-xs font-semibold text-white disabled:opacity-50">
-                {savingBed ? "Assigning..." : "Confirm room"}
-              </button>
-            </>
-          )}
-        </div>
-
-        {availableBeds.length > 12 && (
-          <div className="mt-2 flex flex-wrap gap-2 border-t border-[var(--color-border)] pt-2">
-            <label className="flex min-h-9 min-w-[220px] flex-1 items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-input-bg)] px-2.5 max-[720px]:min-h-11">
-              <Search size={14} className="shrink-0 text-[var(--color-ink-secondary)]" />
-              <input
-                type="search"
-                value={bedSearch}
-                onChange={(event) => setBedSearch(event.target.value)}
-                placeholder="Search bed or zone"
-                aria-label="Search bed or zone"
-                className="min-w-0 flex-1 border-0 bg-transparent text-sm outline-none focus:shadow-none"
-              />
-            </label>
-            <label className="min-w-[170px] max-[480px]:flex-1">
-              <span className="sr-only">Filter beds by zone</span>
-              <select value={bedZoneFilter} onChange={(event) => setBedZoneFilter(event.target.value)} className="min-h-9 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-input-bg)] px-2.5 text-sm max-[720px]:min-h-11">
-                <option value="all">All zones</option>
-                {availableZones.map((zone) => <option key={zone.id} value={zone.id}>{zone.name}</option>)}
-              </select>
-            </label>
-          </div>
-        )}
-
-        {availableBeds.length === 0 ? (
-          <div className="mt-2 rounded-md bg-[var(--color-surface-muted)] px-3 py-2 text-sm text-[var(--color-ink-secondary)]">
-            No beds available.
-          </div>
-        ) : filteredBeds.length === 0 ? (
-          <div className="mt-2 rounded-md bg-[var(--color-surface-muted)] px-3 py-2 text-sm text-[var(--color-ink-secondary)]">
-            No open beds match the current search and zone filter.
-          </div>
-        ) : (
-          <div role="group" aria-label="Available rooms and beds" className="triage-bed-grid mt-2">
-            {filteredBeds.map((bed) => {
-              const zone = zonesById.get(bed.zone);
-              const selected = pendingBed?.id === bed.id;
-              return (
-                <button
-                  key={bed.id}
-                  type="button"
-                  aria-pressed={selected}
-                  aria-label={`${bed.name}, ${zone?.name ?? "Unzoned"}${selected ? ", selected" : ", available"}`}
-                  onClick={() => setPendingBed(selected ? null : { id: bed.id, name: bed.name, zoneId: bed.zone })}
-                  className={`min-h-11 rounded-md border-2 px-2 py-1 text-left text-sm ${
-                    selected
-                      ? "border-[var(--color-primary)] bg-[var(--color-primary-tint)] text-[var(--color-primary)]"
-                      : "border-[var(--color-open-bed-border)] bg-[var(--color-green-tint)] text-[var(--color-green-text)] hover:border-[var(--color-green-solid)] hover:bg-[var(--color-open-bed-hover)]"
-                  }`}
-                >
-                  <span className="flex items-center justify-between gap-1 font-semibold tabular-nums">
-                    <span className="truncate">{bed.name}</span>
-                    {selected && <CheckCircle2 size={14} className="shrink-0" />}
-                  </span>
-                  <span className="block truncate text-xs">{zone?.name ?? "Unzoned"}</span>
-                </button>
-              );
+      <section className="triage-workspace-unified" aria-label="Triage workflow">
+        <section className="triage-flow-section" ref={esiSectionRef}>
+          <div className="triage-section-heading"><span>1</span><h2>ESI level</h2><p>Selected: <strong>{pendingEsi ? `ESI ${pendingEsi}` : "None"}</strong></p></div>
+          <div role="radiogroup" aria-label="ESI triage level" className="triage-flow-esi-grid">
+            {levels.map((level, index) => {
+              const selected = pendingEsi === level;
+              return <button key={level} type="button" role="radio" aria-checked={selected} tabIndex={selected || (pendingEsi === null && index === 0) ? 0 : -1} onClick={() => { setPendingEsi(level); if (!manualPathway) setPendingPathway(pathwayForEsi(level)); }} className={`triage-flow-esi-card triage-flow-esi-${esiTone(level)} ${selected ? "triage-flow-esi-selected" : ""}`}><span>{level}</span><strong>{ESI_CARD_LABELS[level]}</strong></button>;
             })}
           </div>
-        )}
-      </section>
+        </section>
 
-      <section className="triage-section">
-        <div className="flex items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold">Encounter pathway</h2>
-          <span className="text-xs text-[var(--color-ink-secondary)]" aria-live="polite">
-            Current: <strong className="capitalize text-[var(--color-ink)]">{currentPathway.replace(/_/g, " ")}</strong>
-          </span>
-        </div>
-        <div role="radiogroup" aria-label="Encounter pathway" className="mt-2 grid grid-cols-3 gap-1.5 max-[560px]:grid-cols-1">
-          {pathways.map((pathway, index) => {
-            const selected = currentPathway === pathway.value;
-            const hasKnownPathway = pathways.some((option) => option.value === currentPathway);
-            const selectedClass = pathway.value === "fast_track"
-              ? "border-[var(--color-green-solid)] bg-[var(--color-green-tint)] text-[var(--color-green-text)]"
-              : pathway.value === "critical"
-                ? "border-[var(--color-red-solid)] bg-[var(--color-red-tint)] text-[var(--color-red-text)]"
-                : "border-[var(--color-primary)] bg-[var(--color-primary-tint)] text-[var(--color-primary)]";
+        <section className="triage-flow-section">
+          <div className="triage-section-heading triage-vitals-heading">
+            <span>2</span>
+            <h2>Quick vitals</h2>
+            <div className="triage-vitals-status" aria-live="polite">
+              <strong className={recordedVitals === QUICK_VITALS.length ? "triage-status-complete" : "triage-status-info"}>{recordedVitals}/6 recorded</strong>
+              {missingVitals > 0 ? <strong className="triage-status-missing">{missingVitals} missing</strong> : <strong className="triage-status-complete">Complete</strong>}
+              {abnormalVitals > 0 && <strong className="triage-status-abnormal">{abnormalVitals} abnormal</strong>}
+              {vitalsSavedSummary && <strong className="triage-status-saved"><CheckCircle2 size={13} /> {vitalsSavedSummary}</strong>}
+            </div>
+            <div className="triage-vitals-actions">
+              <button type="button" onClick={() => void saveQuickVitals()} disabled={savingVitals || recordedVitals === 0} className="triage-vitals-save-button">{savingVitals ? "Saving..." : "Save vitals"}</button>
+              <button type="button" onClick={() => onOpenTab("Vitals")} className="triage-vitals-secondary-button">Full vitals</button>
+            </div>
+          </div>
+          <div className="triage-vital-grid">
+            {QUICK_VITALS.map((vital) => {
+              const parsed = parseQuickVital(vitals[vital.key]);
+              const band = parsed === null ? "empty" : bandFor(vital.parameter, parsed);
+              const VitalIcon = vital.icon;
+              return <label key={vital.key} className={`triage-vital-tile triage-vital-${band}`} title={vital.fullLabel}><span aria-label={vital.fullLabel}><VitalIcon size={14} aria-hidden="true" /><span className="sr-only">{vital.fullLabel}</span></span><input inputMode="decimal" aria-label={vital.fullLabel} placeholder={"\u2014"} value={vitals[vital.key]} onChange={(event) => setVitals((current) => ({ ...current, [vital.key]: event.target.value }))} />{vitals[vital.key].trim() && <em>{vital.unit}</em>}<i aria-hidden="true" /></label>;
+            })}
+          </div>
+        </section>
+
+        <section className="triage-flow-section" ref={pathwaySectionRef}>
+          <div className="triage-section-heading triage-bed-heading"><span>3</span><h2>Room / bed</h2><label><Search size={14} /><input value={bedSearch} onChange={(event) => setBedSearch(event.target.value)} placeholder="Search bed or zone" /></label><div className="triage-zone-filter" role="group" aria-label="Filter beds by zone"><button type="button" aria-pressed={bedZoneFilter === "all"} onClick={() => setBedZoneFilter("all")}>All <span>{beds.length}</span></button>{zonesWithBeds.map((zone) => <button key={zone.id} type="button" aria-pressed={bedZoneFilter === zone.id} onClick={() => setBedZoneFilter(zone.id)}>{zone.name} <span>{beds.filter((bed) => bed.zone === zone.id).length}</span></button>)}</div><p>Current bed: <strong>{currentBedLabel}</strong></p></div>
+          {filteredBeds.length ? <div role="group" aria-label="Available rooms and beds" className="triage-flow-bed-grid">{visibleBeds.map((bed) => {
+            const zone = zonesById.get(bed.zone);
+            const selected = pendingBed?.id === bed.id;
+            const occupant = bed.encounterId ? encounterById.get(bed.encounterId) : null;
+            const occupiedByOther = Boolean(bed.encounterId && bed.encounterId !== encounterId);
+            const currentBed = bed.encounterId === encounterId;
+            const occupantEsi = occupant?.triage && isEsi(occupant.triage) ? occupant.triage : null;
+            const statusLabel = selected ? "Selected" : currentBed ? "Current bed" : occupiedByOther ? `Occupied${occupantEsi ? ` ESI ${occupantEsi}` : ""}` : "Available";
+            const bedClass = [
+              selected ? "triage-bed-selected" : "",
+              currentBed ? "triage-bed-current" : "",
+              occupiedByOther ? "triage-bed-occupied" : "triage-bed-available",
+              occupantEsi ? `triage-bed-esi-${occupantEsi}` : "",
+            ].filter(Boolean).join(" ");
             return (
               <button
-                key={pathway.value}
+                key={bed.id}
                 type="button"
-                role="radio"
-                aria-checked={selected}
-                tabIndex={selected || (!hasKnownPathway && index === 0) ? 0 : -1}
-                onClick={() => void setEncounterPathway(encounterId, pathway.value, mode, pathway.reason, "Triage nurse")}
-                onKeyDown={(event) => {
-                  const previous = event.key === "ArrowLeft" || event.key === "ArrowUp";
-                  const next = event.key === "ArrowRight" || event.key === "ArrowDown";
-                  if (!previous && !next && event.key !== "Home" && event.key !== "End") return;
-                  event.preventDefault();
-                  const nextIndex = event.key === "Home"
-                    ? 0
-                    : event.key === "End"
-                      ? pathways.length - 1
-                      : (index + (previous ? -1 : 1) + pathways.length) % pathways.length;
-                  const nextPathway = pathways[nextIndex];
-                  void setEncounterPathway(encounterId, nextPathway.value, mode, nextPathway.reason, "Triage nurse");
-                  const choices = event.currentTarget.parentElement?.children;
-                  window.setTimeout(() => (choices?.[nextIndex] as HTMLElement | undefined)?.focus(), 0);
+                aria-pressed={selected || currentBed}
+                disabled={occupiedByOther}
+                title={occupiedByOther ? `${bed.name}: occupied by ${occupant?.patient.name ?? "patient"}${occupantEsi ? `, ESI ${occupantEsi}` : ""}` : `${bed.name}: available in ${zone?.name ?? "Unzoned"}`}
+                onClick={() => {
+                  if (occupiedByOther) return;
+                  setPendingBed(selected ? null : { id: bed.id, name: bed.name, zoneId: bed.zone });
                 }}
-                className={`flex min-h-14 items-center gap-2 rounded-md border-2 px-2.5 py-1.5 text-left text-sm ${selected ? selectedClass : "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-ink)] hover:border-[var(--color-border-strong)] hover:bg-[var(--color-surface-muted)]"}`}
+                className={bedClass}
               >
-                {selected && <CheckCircle2 size={16} className="shrink-0" />}
-                <span className="min-w-0 flex-1">
-                  <strong className="block">{pathway.label}</strong>
-                  <span className={`block truncate text-xs ${selected ? "opacity-80" : "text-[var(--color-ink-secondary)]"}`}>{pathway.description}</span>
-                </span>
-                {selected && <span className="text-xs font-semibold">Selected</span>}
+                <strong>{bed.name}</strong>
+                <span>{zone?.name ?? "Unzoned"}</span>
+                <em>{statusLabel}</em>
               </button>
             );
-          })}
-        </div>
-      </section>
+          })}{hiddenBedCount > 0 && <button type="button" className="triage-bed-view-all" onClick={() => { window.location.href = `/beds?encounter=${encounterId}`; }}>View all <span>{hiddenBedCount}</span></button>}</div> : <p className="triage-empty-line">No beds match the current filters.</p>}
+        </section>
 
-      <TriageHistory encounterId={encounterId} />
+        <section className="triage-flow-section">
+          <div className="triage-section-heading"><span>4</span><h2>Pathway</h2>{suggestedPathway && <p>Suggested from ESI {pendingEsi ?? "\u2014"}: <strong>{pathwayLabel(suggestedPathway)}</strong></p>}</div>
+          <div role="radiogroup" aria-label="Encounter pathway" className="triage-pathway-grid">
+            {PATHWAY_OPTIONS.map((pathway) => <button key={pathway.value} type="button" role="radio" aria-checked={selectedPathway === pathway.value} onClick={() => { setPendingPathway(pathway.value); setManualPathway(true); setSafetyConfirmed(false); }} className={selectedPathway === pathway.value ? "triage-pathway-selected" : ""}><strong>{pathway.label}{suggestedPathway === pathway.value && <em>Suggested</em>}</strong><span>{pathway.description}</span></button>)}
+          </div>
+          {mismatch && <label className="triage-safety-warning"><input type="checkbox" checked={safetyConfirmed} onChange={(event) => setSafetyConfirmed(event.target.checked)} /> ESI {pendingEsi} with Fast-track is unusual. Confirm this override.</label>}
+        </section>
+
+        <div className="triage-confirm-bar">{confirmedSummary ? <div className="triage-confirm-success"><CheckCircle2 size={16} /> {confirmedSummary}</div> : <><span><em>Triage summary</em>{summaryItems.map((item) => <strong key={item.value} className={item.className}>{item.value}</strong>)}</span>{confirmError && <strong role="alert">{confirmError}</strong>}<button type="button" onClick={() => void confirmTriage()} disabled={confirming}>{confirming ? "Confirming..." : "Confirm triage"}</button></>}</div>
+      </section>
+      <section className="triage-history-compact">
+        <button type="button" aria-expanded={historyOpen} onClick={() => setHistoryOpen((open) => !open)} className="triage-history-toggle">
+          <span>Triage history</span>
+          <span>{triageAssessments.length} assessment{triageAssessments.length === 1 ? "" : "s"}</span>
+          {latestAssessment && (
+            <>
+              <span>Last assessment {new Date(latestAssessment.performedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+              <span>ESI {latestAssessment.level}</span>
+            </>
+          )}
+          <ChevronDown size={15} className={historyOpen ? "rotate-180" : ""} />
+        </button>
+        {historyOpen && <TriageHistory encounterId={encounterId} compact />}
+      </section>
     </div>
   );
+}
+
+type QuickVitalKey = "temperature" | "heartRate" | "respiratoryRate" | "spo2" | "systolicBp" | "painScore";
+
+const QUICK_VITALS: { key: QuickVitalKey; parameter: string; fullLabel: string; unit: string; icon: NavIcon }[] = [
+  { key: "temperature", parameter: "temperature", fullLabel: "Temperature", unit: "C", icon: Thermometer },
+  { key: "heartRate", parameter: "heartRate", fullLabel: "Heart rate", unit: "bpm", icon: HeartPulse },
+  { key: "respiratoryRate", parameter: "respiratoryRate", fullLabel: "Respiratory rate", unit: "/min", icon: Wind },
+  { key: "spo2", parameter: "spo2", fullLabel: "Oxygen saturation", unit: "%", icon: Droplets },
+  { key: "systolicBp", parameter: "systolicBp", fullLabel: "Systolic blood pressure", unit: "mmHg", icon: Activity },
+  { key: "painScore", parameter: "painScore", fullLabel: "Pain score", unit: "/10", icon: Activity },
+];
+
+const TRIAGE_VISIBLE_BED_LIMIT = 25;
+
+const TRIAGE_DRAWERS = [
+  { key: "patient" as const, label: "Overview", icon: UserRound, tab: "Overview" as Tab },
+  { key: "medications" as const, label: "Medications", icon: Pill, tab: "Medications" as Tab },
+  { key: "orders" as const, label: "Orders", icon: FlaskConical, tab: "Orders" as Tab },
+  { key: "history" as const, label: "History", icon: HistoryIcon, tab: "History" as Tab },
+];
+
+const ESI_CARD_LABELS: Record<EsiLevel, string> = {
+  1: "Immediate",
+  2: "High risk",
+  3: "Urgent",
+  4: "Less urgent",
+  5: "Non-urgent",
+};
+
+const PATHWAY_OPTIONS = [
+  { value: "fast_track" as const, label: "Fast-track", description: "Stable, low-resource pathway" },
+  { value: "standard" as const, label: "Main ER", description: "Core emergency care queue" },
+  { value: "critical" as const, label: "Resuscitation", description: "Immediate critical-care team" },
+];
+
+function quickVitalsFromLatest(latest: ReturnType<typeof latestVitals>): Record<QuickVitalKey, string> {
+  return {
+    temperature: latest?.temperature != null ? String(latest.temperature) : "",
+    heartRate: latest?.heartRate != null ? String(latest.heartRate) : "",
+    respiratoryRate: latest?.respiratoryRate != null ? String(latest.respiratoryRate) : "",
+    spo2: latest?.spo2 != null ? String(latest.spo2) : "",
+    systolicBp: latest?.systolicBp != null ? String(latest.systolicBp) : "",
+    painScore: latest?.painScore != null ? String(latest.painScore) : "",
+  };
+}
+
+function parseQuickVitals(values: Record<QuickVitalKey, string>): Record<QuickVitalKey, number | null> {
+  return {
+    temperature: parseQuickVital(values.temperature),
+    heartRate: parseQuickVital(values.heartRate),
+    respiratoryRate: parseQuickVital(values.respiratoryRate),
+    spo2: parseQuickVital(values.spo2),
+    systolicBp: parseQuickVital(values.systolicBp),
+    painScore: parseQuickVital(values.painScore),
+  };
+}
+
+function hasQuickVitalsValues(values: Record<QuickVitalKey, number | null>) {
+  return Object.values(values).some((value) => value !== null);
+}
+
+function quickVitalsSignature(values: Record<QuickVitalKey, string>) {
+  return quickVitalsSignatureFromParsed(parseQuickVitals(values));
+}
+
+function quickVitalsSignatureFromParsed(values: Record<QuickVitalKey, number | null>) {
+  return QUICK_VITALS.map((vital) => `${vital.key}:${values[vital.key] ?? ""}`).join("|");
+}
+
+function parseQuickVital(value: string): number | null {
+  if (!value.trim()) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function pathwayForEsi(level: EsiLevel | null): "fast_track" | "standard" | "critical" | null {
+  if (level === 1) return "critical";
+  if (level === 2 || level === 3) return "standard";
+  if (level === 4 || level === 5) return "fast_track";
+  return null;
+}
+
+function normalizePathway(value: string | null | undefined): "fast_track" | "standard" | "critical" | null {
+  return value === "fast_track" || value === "standard" || value === "critical" ? value : null;
+}
+
+function pathwayLabel(value: "fast_track" | "standard" | "critical" | null) {
+  if (value === "fast_track") return "Fast-track";
+  if (value === "critical") return "Resuscitation";
+  return "Main ER";
+}
+
+function pathwayReason(value: "fast_track" | "standard" | "critical") {
+  if (value === "fast_track") return "Low-risk triage pathway selected";
+  if (value === "critical") return "Critical triage pathway selected";
+  return "Main ER triage pathway selected";
+}
+
+function esiTone(level: EsiLevel) {
+  if (level === 1) return "red";
+  if (level === 2) return "orange";
+  if (level === 3) return "yellow";
+  if (level === 4) return "green";
+  return "blue";
 }
 
 function NotesTab({ encounterId }: { encounterId: string }) {

@@ -20,6 +20,7 @@ import type {
   Patient,
   Encounter,
   TriageAssessment,
+  LocationAssignment,
   ClinicalEvent,
   Bed,
   Zone,
@@ -34,9 +35,13 @@ import type {
   PendingCase,
   VitalsSet,
   Avpu,
+  OrderStatus,
+  ResultFlag,
+  ResultReviewStatus,
   MedicationRecord,
   AllergyRecord,
   ConditionRecord,
+  OrderType,
   OrderRecord,
   ResultRecord,
   ImmunizationRecord,
@@ -45,6 +50,7 @@ import type {
   BillingItem,
   Attachment,
   AuditEvent,
+  PrototypeNotification,
   EncounterStatus,
   StateTransition,
 } from "../types";
@@ -129,149 +135,923 @@ export function seedInitialData(): Promise<void> {
 
 async function seedInitialDataInner() {
   if (await isSeeded()) {
-    await ensureMockPatientHistory();
-    await ensurePerfectMockPatient();
-    await ensureClinicalFoundationSeeds();
-    await ensureDomainSeeds();
-    await ensureRegistrationProfileSeed();
-    await ensurePhaseOneSeedMetadata();
+    await ensureFivePatientDemoSeed();
     return;
   }
 
-  await db.zones.bulkAdd(ZONES);
+  await ensureFivePatientDemoSeed();
+}
+
+const FIVE_PATIENT_SEED_MARKER = "five_patient_clinical_seed_v1";
+
+async function ensureFivePatientDemoSeed() {
+  const marker = await db.auditEvents.where("action").equals(FIVE_PATIENT_SEED_MARKER).first();
+  const patientCount = await db.patients.count();
+  if (marker && patientCount > 0) {
+    await db.transaction("rw", db.referenceRanges, db.vitalsSchedules, async () => {
+      for (const range of DEFAULT_REFERENCE_RANGES) await db.referenceRanges.put(range);
+      for (const schedule of DEFAULT_VITALS_SCHEDULES) await db.vitalsSchedules.put(schedule);
+    });
+    return;
+  }
+
+  const now = Date.now();
+  const minsAgo = (minutes: number) => now - minutes * 60_000;
+  const daysAgo = (days: number) => now - days * 86_400_000;
 
   const beds: Bed[] = [];
   for (const zone of ZONES) {
-    const n = BED_COUNTS[zone.id];
-    for (let i = 1; i <= n; i++) {
+    for (let index = 1; index <= BED_COUNTS[zone.id]; index += 1) {
       beds.push({
-        id: uuid(),
-        name: `${zone.name.split(" ")[0].slice(0, 2).toUpperCase()}-${i}`,
+        id: `seed-bed-${zone.id}-${index}`,
+        name: `${zone.name.split(" ")[0].slice(0, 2).toUpperCase()}-${index}`,
         zone: zone.id,
         encounterId: null,
       });
     }
   }
 
-  const esiLevels: (1 | 2 | 3 | 4 | 5)[] = [1, 2, 2, 3, 3, 3, 4, 5];
-  const patients: Patient[] = [];
-  const encounters: Encounter[] = [];
-  const triages: TriageAssessment[] = [];
-  const events: ClinicalEvent[] = [];
-
-  const names = [...LEBANESE_NAMES].sort(() => Math.random() - 0.5);
-
-  for (let i = 0; i < 8; i++) {
-    const now = Date.now();
-    const arrivedAt = now - randInt(10, 240) * 60 * 1000;
-    const displayNumber = nextDisplayNumber("normal");
-    const patientId = uuid();
-    const encounterId = uuid();
-    const esi = esiLevels[i];
-    const bedIndex = i < 6 ? i : -1;
-
-    const patient: Patient = {
-      id: patientId,
-      displayNumber,
-      mrn: nextMrn(),
-      name: names[i],
-      dateOfBirth: `19${randInt(45, 99)}-0${randInt(1, 9)}-1${randInt(0, 9)}`,
-      sex: rand(["male", "female"]),
-      phone: `+961 ${randInt(3, 81)} ${randInt(100000, 999999)}`,
+  const patients: Patient[] = [
+    {
+      id: "seed-patient-1",
+      displayNumber: "#N-0001",
+      mrn: "MRN-2026-100001",
+      patientType: "standard",
+      confidentialityLevel: "normal",
+      name: "Maya Mansour",
+      firstNameEn: "Maya",
+      lastNameEn: "Mansour",
+      motherNameEn: "Rima Mansour",
+      dateOfBirth: "1988-04-16",
+      ageValue: 38,
+      ageUnit: "years",
+      ageCalculated: true,
+      sex: "female",
+      sexAtBirth: "female",
+      phone: "+961 70 555 014",
+      mobileSecondary: "+961 71 555 018",
+      preferredContactMethod: "mobile",
+      nationalId: "LB-881604",
+      email: "maya.mansour@example.test",
+      address: "24 Cedar Street, Building B, Achrafieh, Beirut",
+      addressCountry: "Lebanon",
+      addressGovernorate: "Beirut",
+      addressCity: "Beirut",
+      addressZone: "Achrafieh",
+      addressStreet: "Cedar Street",
+      addressBuilding: "Building B",
+      addressFloor: "4",
+      city: "Beirut",
+      nationality: "Lebanese",
+      maritalStatus: "married",
+      preferredLanguage: "Arabic",
+      emergencyContact: "Rami Mansour | Spouse | +961 71 555 018",
+      emergencyContactName: "Rami Mansour",
+      emergencyContactRelationship: "Spouse",
+      emergencyContactPhone: "+961 71 555 018",
+      insuranceProvider: "MedCare Lebanon",
+      insurancePolicyNumber: "MCL-884210",
+      bloodGroup: "A+",
+      knownConditions: ["Hypertension", "Gastroesophageal reflux disease"],
+      currentMedications: ["Amlodipine 5 mg daily", "Omeprazole 20 mg daily"],
       photoBlob: null,
       identityStatus: "confirmed",
       estimatedAgeRange: null,
-      createdAt: arrivedAt,
-    };
+      registrationComplete: true,
+      duplicateOverride: false,
+      catastropheTags: [],
+      mergedIntoPatientId: null,
+      mergedAt: null,
+      mergeUndoneAt: null,
+      isSynthetic: true,
+      createdAt: minsAgo(118),
+    },
+    {
+      id: "seed-patient-2",
+      displayNumber: "#N-0002",
+      mrn: "MRN-2026-100002",
+      patientType: "standard",
+      confidentialityLevel: "normal",
+      name: "Hassan Zeidan",
+      firstNameEn: "Hassan",
+      lastNameEn: "Zeidan",
+      motherNameEn: "Nada Zeidan",
+      dateOfBirth: "1956-10-03",
+      ageValue: 69,
+      ageUnit: "years",
+      ageCalculated: true,
+      sex: "male",
+      sexAtBirth: "male",
+      phone: "+961 03 889 120",
+      nationalId: "LB-561003",
+      email: "hassan.zeidan@example.test",
+      address: "Independence Avenue, Building D, Hamra, Beirut",
+      addressCountry: "Lebanon",
+      addressGovernorate: "Beirut",
+      addressCity: "Beirut",
+      addressZone: "Hamra",
+      addressStreet: "Independence Avenue",
+      city: "Beirut",
+      nationality: "Lebanese",
+      maritalStatus: "married",
+      preferredLanguage: "Arabic",
+      emergencyContact: "Sana Zeidan | Daughter | +961 70 300 221",
+      emergencyContactName: "Sana Zeidan",
+      emergencyContactRelationship: "Daughter",
+      emergencyContactPhone: "+961 70 300 221",
+      insuranceProvider: "National Social Security Fund",
+      insurancePolicyNumber: "NSSF-229188",
+      bloodGroup: "O+",
+      knownConditions: ["Type 2 diabetes mellitus", "COPD"],
+      currentMedications: ["Metformin 850 mg twice daily", "Tiotropium inhaler daily"],
+      photoBlob: null,
+      identityStatus: "confirmed",
+      estimatedAgeRange: null,
+      registrationComplete: true,
+      duplicateOverride: false,
+      catastropheTags: [],
+      mergedIntoPatientId: null,
+      mergedAt: null,
+      mergeUndoneAt: null,
+      isSynthetic: true,
+      createdAt: minsAgo(76),
+    },
+    {
+      id: "seed-patient-3",
+      displayNumber: "#N-0003",
+      mrn: "MRN-2026-100003",
+      patientType: "standard",
+      confidentialityLevel: "normal",
+      name: "Layal Khoury",
+      firstNameEn: "Layal",
+      lastNameEn: "Khoury",
+      motherNameEn: "Hala Khoury",
+      dateOfBirth: "1997-01-28",
+      ageValue: 29,
+      ageUnit: "years",
+      ageCalculated: true,
+      sex: "female",
+      sexAtBirth: "female",
+      phone: "+961 76 222 501",
+      nationalId: "LB-970128",
+      email: "layal.khoury@example.test",
+      address: "Bliss Street, Building A, Ras Beirut",
+      addressCountry: "Lebanon",
+      addressGovernorate: "Beirut",
+      addressCity: "Beirut",
+      addressZone: "Ras Beirut",
+      addressStreet: "Bliss Street",
+      city: "Beirut",
+      nationality: "Lebanese",
+      maritalStatus: "single",
+      preferredLanguage: "English",
+      emergencyContact: "Nour Khoury | Sister | +961 71 445 022",
+      emergencyContactName: "Nour Khoury",
+      emergencyContactRelationship: "Sister",
+      emergencyContactPhone: "+961 71 445 022",
+      insuranceProvider: "Cedar Health Plan",
+      insurancePolicyNumber: "CHP-771040",
+      bloodGroup: "B+",
+      knownConditions: ["Asthma"],
+      currentMedications: ["Salbutamol inhaler as needed"],
+      photoBlob: null,
+      identityStatus: "confirmed",
+      estimatedAgeRange: null,
+      registrationComplete: true,
+      duplicateOverride: false,
+      catastropheTags: [],
+      mergedIntoPatientId: null,
+      mergedAt: null,
+      mergeUndoneAt: null,
+      isSynthetic: true,
+      createdAt: minsAgo(54),
+    },
+    {
+      id: "seed-patient-4",
+      displayNumber: "#N-0004",
+      mrn: "MRN-2026-100004",
+      patientType: "standard",
+      confidentialityLevel: "normal",
+      name: "Karim Abou Chacra",
+      firstNameEn: "Karim",
+      lastNameEn: "Abou Chacra",
+      motherNameEn: "Mona Abou Chacra",
+      dateOfBirth: "1974-07-09",
+      ageValue: 52,
+      ageUnit: "years",
+      ageCalculated: true,
+      sex: "male",
+      sexAtBirth: "male",
+      phone: "+961 71 410 111",
+      nationalId: "LB-740709",
+      email: "karim.abouchacra@example.test",
+      address: "Gouraud Street, Building C, Gemmayzeh, Beirut",
+      addressCountry: "Lebanon",
+      addressGovernorate: "Beirut",
+      addressCity: "Beirut",
+      addressZone: "Gemmayzeh",
+      addressStreet: "Gouraud Street",
+      city: "Beirut",
+      nationality: "Lebanese",
+      maritalStatus: "married",
+      preferredLanguage: "French",
+      emergencyContact: "Maya Abou Chacra | Spouse | +961 03 405 660",
+      emergencyContactName: "Maya Abou Chacra",
+      emergencyContactRelationship: "Spouse",
+      emergencyContactPhone: "+961 03 405 660",
+      insuranceProvider: "Allianz SNA",
+      insurancePolicyNumber: "ASN-335901",
+      bloodGroup: "O-",
+      knownConditions: ["Hyperlipidemia"],
+      currentMedications: ["Atorvastatin 20 mg nightly"],
+      photoBlob: null,
+      identityStatus: "confirmed",
+      estimatedAgeRange: null,
+      registrationComplete: true,
+      duplicateOverride: false,
+      catastropheTags: [],
+      mergedIntoPatientId: null,
+      mergedAt: null,
+      mergeUndoneAt: null,
+      isSynthetic: true,
+      createdAt: minsAgo(132),
+    },
+    {
+      id: "seed-patient-5",
+      displayNumber: "#N-0005",
+      mrn: "MRN-2026-100005",
+      patientType: "standard",
+      confidentialityLevel: "normal",
+      name: "Rami Haddad",
+      firstNameEn: "Rami",
+      lastNameEn: "Haddad",
+      motherNameEn: "Salma Haddad",
+      dateOfBirth: "2009-11-19",
+      ageValue: 16,
+      ageUnit: "years",
+      ageCalculated: true,
+      sex: "male",
+      sexAtBirth: "male",
+      phone: "+961 70 610 204",
+      nationalId: "LB-091119",
+      email: "rami.haddad@example.test",
+      address: "Mar Elias Street, Building E, Beirut",
+      addressCountry: "Lebanon",
+      addressGovernorate: "Beirut",
+      addressCity: "Beirut",
+      addressZone: "Mar Elias",
+      addressStreet: "Mar Elias Street",
+      city: "Beirut",
+      nationality: "Lebanese",
+      maritalStatus: "single",
+      preferredLanguage: "Arabic",
+      emergencyContact: "Fadi Haddad | Father | +961 70 610 205",
+      emergencyContactName: "Fadi Haddad",
+      emergencyContactRelationship: "Father",
+      emergencyContactPhone: "+961 70 610 205",
+      insuranceProvider: "Bankers Assurance",
+      insurancePolicyNumber: "BA-446102",
+      bloodGroup: "A-",
+      knownConditions: [],
+      currentMedications: [],
+      photoBlob: null,
+      identityStatus: "confirmed",
+      estimatedAgeRange: null,
+      registrationComplete: true,
+      duplicateOverride: false,
+      catastropheTags: [],
+      mergedIntoPatientId: null,
+      mergedAt: null,
+      mergeUndoneAt: null,
+      isSynthetic: true,
+      createdAt: minsAgo(41),
+    },
+  ];
 
-    const zone = ZONES[Math.min(3, Math.floor(i / 2))];
-    const bed = bedIndex >= 0 ? beds.find((b) => b.zone === zone.id && !b.encounterId) : null;
-
-    const encounter: Encounter = {
-      id: encounterId,
-      caseNumber: nextCaseNumber(),
-      patientId,
+  const encounters: Encounter[] = [
+    {
+      id: "seed-encounter-1",
+      caseNumber: "ER-2026-5001",
+      patientId: "seed-patient-1",
       incidentId: null,
       modeAtCreation: "normal",
-      arrivedAt,
-      state: esi <= 2 ? "in_treatment" : "triaged",
+      pathway: "standard",
+      arrivedAt: minsAgo(118),
+      state: "orders_pending",
+      workflowStatus: "AWAITING_RESULTS",
+      disposition: "observation",
+      closedAt: null,
+      chiefComplaint: "Central chest pressure radiating to left shoulder with shortness of breath",
+      arrivalMethod: "ambulance",
+      referralSource: "Beirut EMS Unit 12",
+      allergies: ["Penicillin"],
+      currentLocationName: "AC-1",
+      currentZone: "zone-acute",
+      currentProvider: "Dr. Lina Khoury",
+      assignedNurse: "Nurse Karim Haddad",
+      careTeam: ["Cardiology on call"],
+      updatedAt: minsAgo(8),
+    },
+    {
+      id: "seed-encounter-2",
+      caseNumber: "ER-2026-5002",
+      patientId: "seed-patient-2",
+      incidentId: null,
+      modeAtCreation: "normal",
+      pathway: "critical",
+      arrivedAt: minsAgo(76),
+      state: "in_assessment",
+      workflowStatus: "IN_ASSESSMENT",
       disposition: null,
       closedAt: null,
-      chiefComplaint: rand(CHIEF_COMPLAINTS),
-      allergies: Math.random() > 0.6 ? [rand(ALLERGIES_POOL)] : [],
-      currentLocationName: bed ? bed.name : null,
-      currentZone: bed ? zone.id : null,
-      currentProvider: Math.random() > 0.4 ? "Demo Provider" : null,
+      chiefComplaint: "Fever, productive cough, confusion, and low oxygen saturation",
+      arrivalMethod: "ambulance",
+      referralSource: "Family physician",
+      allergies: ["Iodinated contrast"],
+      currentLocationName: "TR-1",
+      currentZone: "zone-trauma",
+      currentProvider: "Dr. Sami Rahal",
+      assignedNurse: "Nurse Rana Haddad",
+      careTeam: ["Respiratory therapy", "Internal medicine consult"],
+      updatedAt: minsAgo(4),
+    },
+    {
+      id: "seed-encounter-3",
+      caseNumber: "ER-2026-5003",
+      patientId: "seed-patient-3",
+      incidentId: null,
+      modeAtCreation: "normal",
+      pathway: "standard",
+      arrivedAt: minsAgo(54),
+      state: "in_treatment",
+      workflowStatus: "ROOMED",
+      disposition: null,
+      closedAt: null,
+      chiefComplaint: "Asthma flare with wheeze after viral symptoms",
+      arrivalMethod: "walk_in",
+      referralSource: null,
+      allergies: ["Latex"],
+      currentLocationName: "OB-1",
+      currentZone: "zone-observation",
+      currentProvider: "Dr. Nadim Aoun",
+      assignedNurse: "Nurse Joelle Matta",
+      careTeam: ["Respiratory therapy"],
+      updatedAt: minsAgo(6),
+    },
+    {
+      id: "seed-encounter-4",
+      caseNumber: "ER-2026-5004",
+      patientId: "seed-patient-4",
+      incidentId: null,
+      modeAtCreation: "normal",
+      pathway: "standard",
+      arrivedAt: minsAgo(132),
+      state: "admission_pending",
+      workflowStatus: "BOARDING",
+      disposition: "admitted",
+      closedAt: null,
+      chiefComplaint: "Right lower quadrant abdominal pain with vomiting",
+      arrivalMethod: "walk_in",
+      referralSource: null,
+      allergies: [],
+      currentLocationName: "AC-2",
+      currentZone: "zone-acute",
+      currentProvider: "Dr. Mira Boustany",
+      assignedNurse: "Nurse Omar Khalil",
+      careTeam: ["General surgery"],
+      updatedAt: minsAgo(12),
+    },
+    {
+      id: "seed-encounter-5",
+      caseNumber: "ER-2026-5005",
+      patientId: "seed-patient-5",
+      incidentId: null,
+      modeAtCreation: "normal",
+      pathway: "fast_track",
+      arrivedAt: minsAgo(41),
+      state: "discharge_pending",
+      workflowStatus: "DISCHARGE_PENDING",
+      disposition: "discharged",
+      closedAt: null,
+      chiefComplaint: "Left forearm laceration from broken glass",
+      arrivalMethod: "walk_in",
+      referralSource: null,
+      allergies: ["Peanuts"],
+      currentLocationName: "FA-1",
+      currentZone: "zone-fasttrack",
+      currentProvider: "Dr. Fadi Salameh",
+      assignedNurse: "Nurse Maya Sarkis",
+      careTeam: [],
+      updatedAt: minsAgo(3),
+    },
+  ];
+
+  for (const encounter of encounters) {
+    const bed = beds.find((candidate) => candidate.name === encounter.currentLocationName && candidate.zone === encounter.currentZone);
+    if (bed) bed.encounterId = encounter.id;
+  }
+
+  const triages: TriageAssessment[] = [
+    { id: "seed-triage-1", encounterId: "seed-encounter-1", algorithm: "esi", level: 2, performedAt: minsAgo(113), note: "High-risk chest pain; immediate ECG and cardiac monitoring." },
+    { id: "seed-triage-2", encounterId: "seed-encounter-2", algorithm: "esi", level: 2, performedAt: minsAgo(72), note: "Possible sepsis with hypoxia and altered mentation." },
+    { id: "seed-triage-3", encounterId: "seed-encounter-3", algorithm: "esi", level: 3, performedAt: minsAgo(50), note: "Moderate asthma exacerbation; bronchodilator therapy started." },
+    { id: "seed-triage-4", encounterId: "seed-encounter-4", algorithm: "esi", level: 3, performedAt: minsAgo(128), note: "Abdominal pain requiring labs, CT, analgesia, and surgical review." },
+    { id: "seed-triage-5", encounterId: "seed-encounter-5", algorithm: "esi", level: 4, performedAt: minsAgo(38), note: "Stable laceration requiring procedure and tetanus review." },
+  ];
+
+  const vitalsSets: VitalsSet[] = [
+    seededVitals("seed-vitals-1a", "seed-encounter-1", "seed-patient-1", minsAgo(112), { temp: 37.1, hr: 104, rr: 22, sbp: 148, dbp: 92, spo2: 96, pain: 7, glucose: 126 }),
+    seededVitals("seed-vitals-1b", "seed-encounter-1", "seed-patient-1", minsAgo(54), { temp: 37.0, hr: 88, rr: 18, sbp: 132, dbp: 84, spo2: 98, pain: 3, glucose: 118 }),
+    seededVitals("seed-vitals-1c", "seed-encounter-1", "seed-patient-1", minsAgo(10), { temp: 36.9, hr: 82, rr: 16, sbp: 126, dbp: 78, spo2: 98, pain: 1, glucose: 112 }),
+    seededVitals("seed-vitals-2a", "seed-encounter-2", "seed-patient-2", minsAgo(71), { temp: 39.3, hr: 124, rr: 28, sbp: 94, dbp: 58, spo2: 89, pain: 2, glucose: 242, o2: true, avpu: "Voice" }),
+    seededVitals("seed-vitals-2b", "seed-encounter-2", "seed-patient-2", minsAgo(28), { temp: 38.8, hr: 116, rr: 24, sbp: 102, dbp: 62, spo2: 93, pain: 1, glucose: 218, o2: true }),
+    seededVitals("seed-vitals-2c", "seed-encounter-2", "seed-patient-2", minsAgo(6), { temp: 38.4, hr: 108, rr: 22, sbp: 108, dbp: 66, spo2: 95, pain: 1, glucose: 205, o2: true }),
+    seededVitals("seed-vitals-3a", "seed-encounter-3", "seed-patient-3", minsAgo(49), { temp: 37.5, hr: 112, rr: 26, sbp: 118, dbp: 74, spo2: 92, pain: 0, glucose: 96 }),
+    seededVitals("seed-vitals-3b", "seed-encounter-3", "seed-patient-3", minsAgo(14), { temp: 37.2, hr: 94, rr: 20, sbp: 116, dbp: 72, spo2: 97, pain: 0, glucose: 102 }),
+    seededVitals("seed-vitals-4a", "seed-encounter-4", "seed-patient-4", minsAgo(127), { temp: 37.9, hr: 102, rr: 18, sbp: 136, dbp: 84, spo2: 97, pain: 8, glucose: 138 }),
+    seededVitals("seed-vitals-4b", "seed-encounter-4", "seed-patient-4", minsAgo(34), { temp: 38.1, hr: 96, rr: 18, sbp: 128, dbp: 80, spo2: 98, pain: 5, glucose: 124 }),
+    seededVitals("seed-vitals-5a", "seed-encounter-5", "seed-patient-5", minsAgo(37), { temp: 36.8, hr: 82, rr: 16, sbp: 118, dbp: 70, spo2: 99, pain: 4, glucose: 92 }),
+  ];
+
+  const allergies: AllergyRecord[] = [
+    { id: "seed-allergy-1", encounterId: "seed-encounter-1", patientId: "seed-patient-1", substance: "Penicillin", reaction: "Urticaria", severity: "moderate", status: "active", notedAt: daysAgo(500), actor: "Dr. Lina Khoury" },
+    { id: "seed-allergy-2", encounterId: "seed-encounter-2", patientId: "seed-patient-2", substance: "Iodinated contrast", reaction: "Bronchospasm", severity: "severe", status: "active", notedAt: daysAgo(1200), actor: "Dr. Sami Rahal" },
+    { id: "seed-allergy-3", encounterId: "seed-encounter-3", patientId: "seed-patient-3", substance: "Latex", reaction: "Rash", severity: "mild", status: "active", notedAt: daysAgo(900), actor: "Nurse Joelle Matta" },
+    { id: "seed-allergy-5", encounterId: "seed-encounter-5", patientId: "seed-patient-5", substance: "Peanuts", reaction: "Lip swelling", severity: "moderate", status: "active", notedAt: daysAgo(1100), actor: "Dr. Fadi Salameh" },
+  ];
+
+  const conditions: ConditionRecord[] = [
+    { id: "seed-cond-1a", patientId: "seed-patient-1", encounterId: null, name: "Essential hypertension", icd10Code: "I10", icd10Description: "Essential (primary) hypertension", category: "Cardiovascular", onsetDate: "2022-05-01", status: "chronic", notes: "Controlled on amlodipine.", createdAt: daysAgo(400) },
+    { id: "seed-cond-1b", patientId: "seed-patient-1", encounterId: "seed-encounter-1", name: "Chest pain, unspecified", icd10Code: "R07.9", icd10Description: "Chest pain, unspecified", category: "Cardiovascular", onsetDate: new Date(minsAgo(118)).toISOString().slice(0, 10), status: "active", notes: "Serial ECG/troponin observation.", createdAt: minsAgo(110) },
+    { id: "seed-cond-2a", patientId: "seed-patient-2", encounterId: null, name: "Type 2 diabetes mellitus without complications", icd10Code: "E11.9", icd10Description: "Type 2 diabetes mellitus without complications", category: "Endocrine / metabolic", onsetDate: "2018-03-20", status: "chronic", notes: "Home metformin.", createdAt: daysAgo(1600) },
+    { id: "seed-cond-2b", patientId: "seed-patient-2", encounterId: "seed-encounter-2", name: "Sepsis, unspecified organism", icd10Code: "A41.9", icd10Description: "Sepsis, unspecified organism", category: "Infectious", onsetDate: new Date(minsAgo(76)).toISOString().slice(0, 10), status: "active", notes: "Likely pneumonia source.", createdAt: minsAgo(60) },
+    { id: "seed-cond-3a", patientId: "seed-patient-3", encounterId: null, name: "Asthma, unspecified", icd10Code: "J45.909", icd10Description: "Unspecified asthma, uncomplicated", category: "Respiratory", onsetDate: "2012-06-10", status: "chronic", notes: "Uses salbutamol PRN.", createdAt: daysAgo(2500) },
+    { id: "seed-cond-4a", patientId: "seed-patient-4", encounterId: "seed-encounter-4", name: "Acute appendicitis", icd10Code: "K35.80", icd10Description: "Unspecified acute appendicitis", category: "Gastrointestinal", onsetDate: new Date(minsAgo(132)).toISOString().slice(0, 10), status: "active", notes: "Accepted by surgery; boarding for OR bed.", createdAt: minsAgo(62) },
+    { id: "seed-cond-5a", patientId: "seed-patient-5", encounterId: "seed-encounter-5", name: "Laceration without foreign body of left forearm", icd10Code: "S51.812A", icd10Description: "Laceration without foreign body of left forearm, initial encounter", category: "Trauma and injury", onsetDate: new Date(minsAgo(41)).toISOString().slice(0, 10), status: "active", notes: "Repaired in fast track.", createdAt: minsAgo(30) },
+  ];
+
+  const medications: MedicationRecord[] = [
+    { id: "seed-med-1a", patientId: "seed-patient-1", encounterId: null, name: "Amlodipine", dose: "5 mg", route: "PO", frequency: "Once daily", status: "active", startedAt: daysAgo(400), stoppedAt: null, prescriber: "Dr. Lina Khoury", notes: "Home medication.", createdAt: daysAgo(400) },
+    { id: "seed-med-1b", patientId: "seed-patient-1", encounterId: "seed-encounter-1", name: "Aspirin", dose: "324 mg", route: "PO", frequency: "Once", status: "active", startedAt: minsAgo(101), stoppedAt: null, prescriber: "Dr. Lina Khoury", notes: "Given after allergy check.", createdAt: minsAgo(101) },
+    { id: "seed-med-2a", patientId: "seed-patient-2", encounterId: "seed-encounter-2", name: "Ceftriaxone", dose: "2 g", route: "IV", frequency: "Once daily", status: "active", startedAt: minsAgo(52), stoppedAt: null, prescriber: "Dr. Sami Rahal", notes: "Sepsis bundle.", createdAt: minsAgo(52) },
+    { id: "seed-med-2b", patientId: "seed-patient-2", encounterId: "seed-encounter-2", name: "Azithromycin", dose: "500 mg", route: "IV", frequency: "Once daily", status: "active", startedAt: minsAgo(50), stoppedAt: null, prescriber: "Dr. Sami Rahal", notes: "Pneumonia coverage.", createdAt: minsAgo(50) },
+    { id: "seed-med-3a", patientId: "seed-patient-3", encounterId: "seed-encounter-3", name: "Salbutamol nebulizer", dose: "5 mg", route: "NEB", frequency: "Every 20 min x3", status: "active", startedAt: minsAgo(44), stoppedAt: null, prescriber: "Dr. Nadim Aoun", notes: "Improved after two treatments.", createdAt: minsAgo(44) },
+    { id: "seed-med-4a", patientId: "seed-patient-4", encounterId: "seed-encounter-4", name: "Morphine", dose: "4 mg", route: "IV", frequency: "Once", status: "active", startedAt: minsAgo(90), stoppedAt: null, prescriber: "Dr. Mira Boustany", notes: "Pain improved.", createdAt: minsAgo(90) },
+    { id: "seed-med-5a", patientId: "seed-patient-5", encounterId: "seed-encounter-5", name: "Tdap vaccine", dose: "0.5 mL", route: "IM", frequency: "Once", status: "active", startedAt: minsAgo(18), stoppedAt: null, prescriber: "Dr. Fadi Salameh", notes: "Tetanus booster administered.", createdAt: minsAgo(18) },
+  ];
+
+  const orders: OrderRecord[] = [
+    order("seed-order-1-ecg", "seed-encounter-1", "seed-patient-1", "procedure", "12-lead ECG", "Perform immediately and repeat if pain recurs.", "stat", "completed", minsAgo(105), "Dr. Lina Khoury", "Cardiology"),
+    order("seed-order-1-trop0", "seed-encounter-1", "seed-patient-1", "laboratory", "High-sensitivity troponin I", "Baseline specimen.", "stat", "reviewed", minsAgo(103), "Dr. Lina Khoury", "Laboratory"),
+    order("seed-order-1-trop2", "seed-encounter-1", "seed-patient-1", "laboratory", "High-sensitivity troponin I - 2 hour repeat", "Repeat troponin at 2 hours.", "stat", "specimen_collected", minsAgo(34), "Dr. Lina Khoury", "Laboratory"),
+    order("seed-order-1-cxr", "seed-encounter-1", "seed-patient-1", "imaging", "Portable chest radiograph", "Evaluate chest pain and dyspnea.", "urgent", "completed", minsAgo(101), "Dr. Lina Khoury", "Radiology"),
+    order("seed-order-2-cbc", "seed-encounter-2", "seed-patient-2", "laboratory", "CBC with differential", "Sepsis evaluation.", "stat", "result_available", minsAgo(64), "Dr. Sami Rahal", "Laboratory"),
+    order("seed-order-2-lactate", "seed-encounter-2", "seed-patient-2", "laboratory", "Lactate", "Sepsis bundle.", "stat", "result_available", minsAgo(63), "Dr. Sami Rahal", "Laboratory"),
+    order("seed-order-2-culture", "seed-encounter-2", "seed-patient-2", "laboratory", "Blood cultures x2", "Before antibiotics if no delay.", "stat", "in_progress", minsAgo(62), "Dr. Sami Rahal", "Laboratory"),
+    order("seed-order-2-cxr", "seed-encounter-2", "seed-patient-2", "imaging", "Portable chest radiograph", "Suspected pneumonia.", "stat", "completed", minsAgo(61), "Dr. Sami Rahal", "Radiology"),
+    order("seed-order-3-neb", "seed-encounter-3", "seed-patient-3", "treatment", "Nebulized bronchodilator protocol", "Salbutamol/ipratropium per protocol.", "urgent", "completed", minsAgo(45), "Dr. Nadim Aoun", "Emergency Department"),
+    order("seed-order-3-peak", "seed-encounter-3", "seed-patient-3", "monitoring", "Peak expiratory flow", "Record before discharge decision.", "routine", "ordered", minsAgo(16), "Dr. Nadim Aoun", "Emergency Department"),
+    order("seed-order-4-cbc", "seed-encounter-4", "seed-patient-4", "laboratory", "CBC", "Right lower quadrant pain.", "urgent", "reviewed", minsAgo(119), "Dr. Mira Boustany", "Laboratory"),
+    order("seed-order-4-ct", "seed-encounter-4", "seed-patient-4", "imaging", "CT abdomen/pelvis without IV contrast", "Contrast allergy screening complete; non-contrast protocol.", "urgent", "reviewed", minsAgo(112), "Dr. Mira Boustany", "Radiology"),
+    order("seed-order-4-admit", "seed-encounter-4", "seed-patient-4", "admission", "Admit to surgery", "Accepted by general surgery; NPO.", "urgent", "acknowledged", minsAgo(44), "Dr. Mira Boustany", "Admissions"),
+    order("seed-order-5-repair", "seed-encounter-5", "seed-patient-5", "procedure", "Laceration repair", "Irrigation and simple interrupted sutures.", "routine", "completed", minsAgo(28), "Dr. Fadi Salameh", "Emergency Department"),
+    order("seed-order-5-tdap", "seed-encounter-5", "seed-patient-5", "medication", "Tdap vaccine", "Booster due.", "routine", "completed", minsAgo(24), "Dr. Fadi Salameh", "Pharmacy"),
+  ];
+
+  const results: ResultRecord[] = [
+    result("seed-result-1-ecg", "seed-encounter-1", "seed-patient-1", "seed-order-1-ecg", "ECG interpretation", "Normal sinus rhythm, no acute ST elevation", null, null, "normal", minsAgo(96), "Dr. Lina Khoury", "reviewed"),
+    result("seed-result-1-trop0", "seed-encounter-1", "seed-patient-1", "seed-order-1-trop0", "Troponin I (hs)", "7", "ng/L", "<14", "normal", minsAgo(72), "Lab Tech Salma N.", "reviewed"),
+    result("seed-result-1-cxr", "seed-encounter-1", "seed-patient-1", "seed-order-1-cxr", "Chest radiograph", "No acute cardiopulmonary abnormality", null, null, "normal", minsAgo(70), "Dr. Nadim Aoun", "reviewed"),
+    result("seed-result-2-wbc", "seed-encounter-2", "seed-patient-2", "seed-order-2-cbc", "WBC", "18.6", "10^9/L", "4.0-11.0", "abnormal", minsAgo(42), "Lab Tech Salma N.", "action_required"),
+    result("seed-result-2-lactate", "seed-encounter-2", "seed-patient-2", "seed-order-2-lactate", "Lactate", "4.2", "mmol/L", "0.5-2.2", "critical", minsAgo(40), "Lab Tech Salma N.", "acknowledged", "Sepsis bundle started; IV antibiotics and fluids ordered."),
+    result("seed-result-2-cxr", "seed-encounter-2", "seed-patient-2", "seed-order-2-cxr", "Chest radiograph", "Right lower-lobe infiltrate", null, null, "abnormal", minsAgo(36), "Dr. Nadim Aoun", "reviewed"),
+    result("seed-result-3-peak", "seed-encounter-3", "seed-patient-3", "seed-order-3-peak", "Peak flow", "360", "L/min", ">400 or personal best", "abnormal", minsAgo(12), "Nurse Joelle Matta", "unreviewed"),
+    result("seed-result-4-wbc", "seed-encounter-4", "seed-patient-4", "seed-order-4-cbc", "WBC", "14.8", "10^9/L", "4.0-11.0", "abnormal", minsAgo(88), "Lab Tech Salma N.", "reviewed"),
+    result("seed-result-4-ct", "seed-encounter-4", "seed-patient-4", "seed-order-4-ct", "CT abdomen/pelvis", "Dilated appendix with periappendiceal fat stranding; no abscess", null, null, "abnormal", minsAgo(57), "Dr. Nadim Aoun", "reviewed"),
+    result("seed-result-5-xray", "seed-encounter-5", "seed-patient-5", null, "Foreign body screen", "No radiopaque foreign body", null, null, "normal", minsAgo(20), "Dr. Fadi Salameh", "reviewed"),
+  ];
+
+  const procedures: ProcedureRecord[] = [
+    { id: "seed-proc-1", encounterId: "seed-encounter-1", patientId: "seed-patient-1", name: "Peripheral IV cannulation", category: "Vascular access", performedAt: minsAgo(104), operator: "Nurse Karim Haddad", site: "Right antecubital fossa", outcome: "18G IV patent", notes: null, createdAt: minsAgo(104) },
+    { id: "seed-proc-2", encounterId: "seed-encounter-2", patientId: "seed-patient-2", name: "Blood culture collection", category: "Laboratory collection", performedAt: minsAgo(58), operator: "Nurse Rana Haddad", site: "Two peripheral sites", outcome: "Sent before antibiotics", notes: null, createdAt: minsAgo(58) },
+    { id: "seed-proc-5", encounterId: "seed-encounter-5", patientId: "seed-patient-5", name: "Simple laceration repair", category: "Wound care", performedAt: minsAgo(22), operator: "Dr. Fadi Salameh", site: "Left forearm", outcome: "5 nylon sutures placed", notes: "Return in 7-10 days for removal.", createdAt: minsAgo(22) },
+  ];
+
+  const immunizations: ImmunizationRecord[] = [
+    { id: "seed-imm-1", patientId: "seed-patient-1", encounterId: null, vaccine: "Influenza", dose: "Seasonal", date: "2025-10-03", site: "Left deltoid", lot: "FLU-2025-A", provider: "Primary care", status: "administered", createdAt: daysAgo(280) },
+    { id: "seed-imm-5", patientId: "seed-patient-5", encounterId: "seed-encounter-5", vaccine: "Tdap", dose: "0.5 mL", date: new Date(minsAgo(18)).toISOString().slice(0, 10), site: "Right deltoid", lot: "TDAP-7112", provider: "Nurse Maya Sarkis", status: "administered", createdAt: minsAgo(18) },
+  ];
+
+  const programs: ProgramRecord[] = [
+    { id: "seed-prog-1", patientId: "seed-patient-1", encounterId: null, name: "Hypertension follow-up", type: "chronic-care", enrolledAt: daysAgo(380), status: "active", coordinator: "Dr. Lina Khoury", notes: "Quarterly BP review.", createdAt: daysAgo(380) },
+    { id: "seed-prog-2", patientId: "seed-patient-2", encounterId: null, name: "Diabetes care pathway", type: "chronic-care", enrolledAt: daysAgo(900), status: "active", coordinator: "Dr. Sami Rahal", notes: "A1c follow-up after discharge.", createdAt: daysAgo(900) },
+  ];
+
+  const billingItems: BillingItem[] = [
+    { id: "seed-bill-1a", encounterId: "seed-encounter-1", patientId: "seed-patient-1", code: "ER-CONS", description: "Emergency consultation", category: "Consultation", amount: 120, status: "billed", createdAt: minsAgo(110) },
+    { id: "seed-bill-1b", encounterId: "seed-encounter-1", patientId: "seed-patient-1", code: "LAB-TROP", description: "High-sensitivity troponin", category: "Laboratory", amount: 35, status: "pending", createdAt: minsAgo(103) },
+    { id: "seed-bill-2a", encounterId: "seed-encounter-2", patientId: "seed-patient-2", code: "CRIT-CARE", description: "Critical care first hour", category: "Consultation", amount: 280, status: "pending", createdAt: minsAgo(68) },
+    { id: "seed-bill-4a", encounterId: "seed-encounter-4", patientId: "seed-patient-4", code: "IMG-CTAP", description: "CT abdomen/pelvis", category: "Imaging", amount: 240, status: "pending", createdAt: minsAgo(112) },
+    { id: "seed-bill-5a", encounterId: "seed-encounter-5", patientId: "seed-patient-5", code: "PROC-LAC", description: "Simple laceration repair", category: "Procedure", amount: 95, status: "billed", createdAt: minsAgo(22) },
+  ];
+
+  const attachments: Attachment[] = [
+    { id: "seed-att-1", encounterId: "seed-encounter-1", patientId: "seed-patient-1", title: "ECG tracing", category: "document", fileName: "maya-ecg.pdf", mimeType: "application/pdf", blob: null, uploadedAt: minsAgo(94), uploadedBy: "Dr. Lina Khoury" },
+    { id: "seed-att-2", encounterId: "seed-encounter-2", patientId: "seed-patient-2", title: "EMS handoff sheet", category: "document", fileName: "hassan-ems.pdf", mimeType: "application/pdf", blob: null, uploadedAt: minsAgo(69), uploadedBy: "Registrar Hala" },
+    { id: "seed-att-4", encounterId: "seed-encounter-4", patientId: "seed-patient-4", title: "CT report", category: "imaging", fileName: "karim-ct-report.pdf", mimeType: "application/pdf", blob: null, uploadedAt: minsAgo(56), uploadedBy: "Radiology" },
+    { id: "seed-att-5", encounterId: "seed-encounter-5", patientId: "seed-patient-5", title: "Wound photo", category: "photo", fileName: "rami-forearm-before.jpg", mimeType: "image/jpeg", blob: null, uploadedAt: minsAgo(27), uploadedBy: "Nurse Maya Sarkis" },
+  ];
+
+  const relatedPersons: RelatedPerson[] = patients.map((patient, index) => ({
+    id: `seed-related-${index + 1}`,
+    patientId: patient.id,
+    fullName: patient.emergencyContactName ?? "Family contact",
+    englishName: patient.emergencyContactName ?? "Family contact",
+    arabicName: null,
+    relationship: patient.emergencyContactRelationship ?? "Relative",
+    mobilePrimary: patient.emergencyContactPhone ?? null,
+    mobileSecondary: null,
+    email: null,
+    address: patient.address ?? null,
+    nationalId: null,
+    isEmergencyContact: true,
+    isNextOfKin: true,
+    isSpouse: patient.emergencyContactRelationship === "Spouse",
+    isParent: ["Mother", "Father"].includes(patient.emergencyContactRelationship ?? ""),
+    isLegalGuardian: patient.id === "seed-patient-5",
+    isAuthorizedRepresentative: patient.id === "seed-patient-5",
+    preferredContactMethod: "mobile",
+    contactPriority: 1,
+    notes: "Seeded emergency contact",
+    createdAt: patient.createdAt,
+    updatedAt: now,
+  }));
+
+  const patientIdentifiers: PatientIdentifier[] = patients.flatMap((patient) => [
+    { id: `${patient.id}-mrn`, patientId: patient.id, type: "mrn", value: patient.mrn!, issuingCountry: "Lebanon", issueDate: "2026-01-01", expiryDate: null, isPrimary: true, verificationStatus: "verified", verifiedBy: "Seed", verificationDate: "2026-01-01", frontImageBlob: null, backImageBlob: null, notes: null, createdAt: patient.createdAt },
+    { id: `${patient.id}-national`, patientId: patient.id, type: "national_id", value: patient.nationalId!, issuingCountry: "Lebanon", issueDate: null, expiryDate: null, isPrimary: true, verificationStatus: "verified", verifiedBy: "Seed", verificationDate: "2026-01-01", frontImageBlob: null, backImageBlob: null, notes: null, createdAt: patient.createdAt },
+  ]);
+
+  const insurancePolicies: InsurancePolicy[] = patients.map((patient) => ({
+    id: `${patient.id}-insurance`,
+    patientId: patient.id,
+    payerId: null,
+    payerName: patient.insuranceProvider ?? "Self pay",
+    plan: null,
+    membershipNumber: patient.insurancePolicyNumber ?? null,
+    policyNumber: patient.insurancePolicyNumber ?? null,
+    coverageClass: null,
+    subscriberRelationship: null,
+    subscriberName: patient.name,
+    subscriberId: patient.nationalId ?? null,
+    effectiveDate: "2026-01-01",
+    expiryDate: "2027-12-31",
+    isDefault: true,
+    approvalRequired: patient.id === "seed-patient-4",
+    notes: patient.id === "seed-patient-4" ? "Surgical admission requires approval." : null,
+    cardImageBlob: null,
+    createdAt: patient.createdAt,
+    updatedAt: now,
+  }));
+
+  const civilRegistryRecords: CivilRegistryRecord[] = patients.map((patient, index) => ({
+    id: `${patient.id}-civil`,
+    patientId: patient.id,
+    sijilNumber: String(210 + index),
+    sahifaNumber: String(80 + index),
+    daira: patient.addressZone ?? "Beirut",
+    registryCountry: "Lebanon",
+    registryGovernorate: patient.addressGovernorate ?? "Beirut",
+    registryDistrict: patient.addressCity ?? "Beirut",
+    registryLocality: patient.addressZone ?? null,
+    registryNotes: "Seeded civil registry record.",
+    updatedAt: now,
+  }));
+
+  const employmentRecords: EmploymentRecord[] = [
+    { id: "seed-employment-1", patientId: "seed-patient-1", occupation: "Teacher", employmentStatus: "employed", employer: "Beirut International School", jobTitle: null, workPhone: null, workAddress: "Beirut", industry: "Education", notes: null, updatedAt: now },
+    { id: "seed-employment-2", patientId: "seed-patient-2", occupation: "Retired taxi driver", employmentStatus: "retired", employer: null, jobTitle: null, workPhone: null, workAddress: null, industry: "Transport", notes: null, updatedAt: now },
+    { id: "seed-employment-3", patientId: "seed-patient-3", occupation: "Accountant", employmentStatus: "employed", employer: "Cedar Foods", jobTitle: null, workPhone: null, workAddress: "Beirut", industry: "Finance", notes: null, updatedAt: now },
+    { id: "seed-employment-4", patientId: "seed-patient-4", occupation: "Restaurant owner", employmentStatus: "self_employed", employer: "Family business", jobTitle: null, workPhone: null, workAddress: "Gemmayzeh", industry: "Hospitality", notes: null, updatedAt: now },
+    { id: "seed-employment-5", patientId: "seed-patient-5", occupation: "Student", employmentStatus: "student", employer: "Secondary school", jobTitle: null, workPhone: null, workAddress: null, industry: "Education", notes: null, updatedAt: now },
+  ];
+
+  const pendingCases: PendingCase[] = [
+    { id: "seed-pending-1", patientId: "seed-patient-1", encounterId: "seed-encounter-1", caseNumber: "ER-2026-5001", requestNumber: "REQ-TROP-REPEAT", requestDate: minsAgo(34), requestType: "Repeat troponin", pendingStatus: "pending_specimen", responsibleDepartment: "Laboratory", assignedOwner: "Nurse Karim Haddad", createdAt: minsAgo(34) },
+    { id: "seed-pending-4", patientId: "seed-patient-4", encounterId: "seed-encounter-4", caseNumber: "ER-2026-5004", requestNumber: "REQ-BED-SURG", requestDate: minsAgo(42), requestType: "Surgical bed", pendingStatus: "pending_bed", responsibleDepartment: "Admissions", assignedOwner: "Bed manager", createdAt: minsAgo(42) },
+    { id: "seed-pending-5", patientId: "seed-patient-5", encounterId: "seed-encounter-5", caseNumber: "ER-2026-5005", requestNumber: "REQ-DISCHARGE", requestDate: minsAgo(8), requestType: "Discharge instructions", pendingStatus: "pending_documentation", responsibleDepartment: "Fast-track", assignedOwner: "Dr. Fadi Salameh", createdAt: minsAgo(8) },
+  ];
+
+  const locationAssignments: LocationAssignment[] = encounters
+    .filter((encounter) => encounter.currentLocationName && encounter.currentZone)
+    .map((encounter) => ({
+      id: `${encounter.id}-location`,
+      encounterId: encounter.id,
+      locationName: encounter.currentLocationName!,
+      zone: encounter.currentZone!,
+      assignedAt: encounter.arrivedAt + 8 * 60_000,
+      releasedAt: null,
+    }));
+
+  const clinicalEvents: ClinicalEvent[] = [
+    ...encounters.map((encounter) => event(`${encounter.id}-created`, encounter.id, "created", encounter.arrivedAt, { caseNumber: encounter.caseNumber, mode: "normal" })),
+    ...vitalsSets.map((set) => event(`${set.id}-event`, set.encounterId, "vitals", set.recordedAt, { vitalsSetId: set.id, bp: `${set.systolicBp}/${set.diastolicBp}`, hr: set.heartRate, rr: set.respiratoryRate, spo2: set.spo2, temp: set.temperature, painScore: set.painScore, news2: set.news2 })),
+    event("seed-event-1-assessment", "seed-encounter-1", "assessment", minsAgo(98), { impression: "Moderate-risk chest pain; ACS rule-out in observation.", plan: "Serial ECG/troponin, aspirin, telemetry.", actor: "Dr. Lina Khoury" }),
+    event("seed-event-2-assessment", "seed-encounter-2", "assessment", minsAgo(66), { impression: "Sepsis likely secondary to pneumonia.", plan: "Sepsis bundle, oxygen, antibiotics, reassess lactate.", actor: "Dr. Sami Rahal" }),
+    event("seed-event-3-assessment", "seed-encounter-3", "assessment", minsAgo(46), { impression: "Moderate asthma exacerbation improving after bronchodilator.", plan: "Continue nebs, peak flow, discharge if sustained improvement.", actor: "Dr. Nadim Aoun" }),
+    event("seed-event-4-assessment", "seed-encounter-4", "assessment", minsAgo(116), { impression: "Acute appendicitis.", plan: "NPO, IV fluids, analgesia, surgical admission.", actor: "Dr. Mira Boustany" }),
+    event("seed-event-5-assessment", "seed-encounter-5", "assessment", minsAgo(32), { impression: "Clean linear forearm laceration without neurovascular injury.", plan: "Irrigation, suture repair, Tdap, discharge instructions.", actor: "Dr. Fadi Salameh" }),
+    ...orders.map((row) => event(`${row.id}-event`, row.encounterId, "order", row.orderedAt, { orderId: row.id, orderType: row.orderType, name: row.name, priority: row.priority, status: row.status, actor: row.actor })),
+    ...results.map((row) => event(`${row.id}-event`, row.encounterId, row.flag === "critical" ? "critical_alert" : "result", row.resultedAt, { resultId: row.id, orderId: row.orderId, name: row.name, value: row.value, unit: row.unit, flag: row.flag, reviewStatus: row.reviewStatus })),
+    event("seed-event-1-med", "seed-encounter-1", "medication", minsAgo(101), { name: "Aspirin", dose: "324 mg", route: "PO", actor: "Nurse Karim Haddad" }),
+    event("seed-event-2-med", "seed-encounter-2", "medication", minsAgo(50), { name: "Ceftriaxone + azithromycin", route: "IV", actor: "Nurse Rana Haddad" }),
+    event("seed-event-5-procedure", "seed-encounter-5", "treatment", minsAgo(22), { name: "Laceration repair", details: "5 nylon sutures placed.", actor: "Dr. Fadi Salameh" }),
+    event("seed-event-4-dispo", "seed-encounter-4", "disposition", minsAgo(44), { disposition: "admitted", service: "General surgery", status: "boarding", actor: "Dr. Mira Boustany" }),
+    event("seed-event-5-dispo", "seed-encounter-5", "disposition", minsAgo(8), { disposition: "discharged", status: "instructions pending", actor: "Dr. Fadi Salameh" }),
+  ];
+
+  const transitions: StateTransition[] = [
+    ...seedTransitionRows("seed-encounter-1", seedPathTo("AWAITING_RESULTS"), minsAgo(118), minsAgo(34)),
+    ...seedTransitionRows("seed-encounter-2", seedPathTo("IN_ASSESSMENT"), minsAgo(76), minsAgo(66)),
+    ...seedTransitionRows("seed-encounter-3", seedPathTo("ROOMED"), minsAgo(54), minsAgo(46)),
+    ...seedTransitionRows("seed-encounter-4", seedPathTo("BOARDING"), minsAgo(132), minsAgo(42)),
+    ...seedTransitionRows("seed-encounter-5", seedPathTo("DISCHARGE_PENDING"), minsAgo(41), minsAgo(8)),
+  ];
+
+  const notifications: PrototypeNotification[] = [
+    { id: "seed-note-1", type: "order", severity: "info", title: "Repeat troponin due", message: "Maya Mansour has a 2-hour troponin specimen collected and pending final result.", patientId: "seed-patient-1", encounterId: "seed-encounter-1", createdAt: minsAgo(7), readAt: null, acknowledgedAt: null, acknowledgedBy: null },
+    { id: "seed-note-2", type: "critical_result", severity: "critical", title: "Critical lactate", message: "Hassan Zeidan lactate 4.2 mmol/L. Sepsis bundle has been started.", patientId: "seed-patient-2", encounterId: "seed-encounter-2", createdAt: minsAgo(39), readAt: null, acknowledgedAt: minsAgo(35), acknowledgedBy: "Dr. Sami Rahal" },
+    { id: "seed-note-3", type: "medication", severity: "info", title: "Medication administered", message: "Rami Haddad received Tdap after laceration repair.", patientId: "seed-patient-5", encounterId: "seed-encounter-5", createdAt: minsAgo(18), readAt: null, acknowledgedAt: null, acknowledgedBy: null },
+    { id: "seed-note-4", type: "bed", severity: "warning", title: "Boarding patient", message: "Karim Abou Chacra is accepted by surgery and waiting for inpatient bed assignment.", patientId: "seed-patient-4", encounterId: "seed-encounter-4", createdAt: minsAgo(12), readAt: null, acknowledgedAt: null, acknowledgedBy: null },
+  ];
+
+  const auditEvents: AuditEvent[] = [
+    ...encounters.map((encounter) => audit(`${encounter.id}-audit-created`, "encounter", encounter.id, "created", null, encounter.chiefComplaint ?? "", encounter.arrivedAt, encounter.patientId, encounter.id)),
+    audit("seed-audit-marker", "system", "seed", FIVE_PATIENT_SEED_MARKER, null, "Curated five-patient ER dataset seeded", now, null, null),
+    audit("seed-audit-alert", "system", "seed", "seed_alert", null, "Five realistic ER cases loaded for full-system testing", now, null, null),
+  ];
+
+  await db.transaction(
+    "rw",
+    [
+      db.patients,
+      db.encounters,
+      db.triageAssessments,
+      db.locationAssignments,
+      db.clinicalEvents,
+      db.auditEvents,
+      db.patientIdentifiers,
+      db.relatedPersons,
+      db.insurancePolicies,
+      db.civilRegistryRecords,
+      db.employmentRecords,
+      db.militaryRecords,
+      db.pendingCases,
+      db.vitalsSets,
+      db.referenceRanges,
+      db.vitalsSchedules,
+      db.mergeRecords,
+      db.stateTransitions,
+      db.incidents,
+      db.reconciliationItems,
+      db.beds,
+      db.zones,
+      db.medications,
+      db.allergyRecords,
+      db.conditions,
+      db.orderRecords,
+      db.resultRecords,
+      db.immunizations,
+      db.procedures,
+      db.programs,
+      db.billingItems,
+      db.attachments,
+      db.prototypeNotifications,
+    ],
+    async () => {
+      await Promise.all([
+        db.patients.clear(),
+        db.encounters.clear(),
+        db.triageAssessments.clear(),
+        db.locationAssignments.clear(),
+        db.clinicalEvents.clear(),
+        db.auditEvents.clear(),
+        db.patientIdentifiers.clear(),
+        db.relatedPersons.clear(),
+        db.insurancePolicies.clear(),
+        db.civilRegistryRecords.clear(),
+        db.employmentRecords.clear(),
+        db.militaryRecords.clear(),
+        db.pendingCases.clear(),
+        db.vitalsSets.clear(),
+        db.referenceRanges.clear(),
+        db.vitalsSchedules.clear(),
+        db.mergeRecords.clear(),
+        db.stateTransitions.clear(),
+        db.incidents.clear(),
+        db.reconciliationItems.clear(),
+        db.beds.clear(),
+        db.zones.clear(),
+        db.medications.clear(),
+        db.allergyRecords.clear(),
+        db.conditions.clear(),
+        db.orderRecords.clear(),
+        db.resultRecords.clear(),
+        db.immunizations.clear(),
+        db.procedures.clear(),
+        db.programs.clear(),
+        db.billingItems.clear(),
+        db.attachments.clear(),
+        db.prototypeNotifications.clear(),
+      ]);
+
+      await db.zones.bulkAdd(ZONES);
+      await db.beds.bulkAdd(beds);
+      await db.patients.bulkAdd(patients);
+      await db.encounters.bulkAdd(encounters);
+      await db.triageAssessments.bulkAdd(triages);
+      await db.locationAssignments.bulkAdd(locationAssignments);
+      await db.clinicalEvents.bulkAdd(clinicalEvents);
+      await db.patientIdentifiers.bulkAdd(patientIdentifiers);
+      await db.relatedPersons.bulkAdd(relatedPersons);
+      await db.insurancePolicies.bulkAdd(insurancePolicies);
+      await db.civilRegistryRecords.bulkAdd(civilRegistryRecords);
+      await db.employmentRecords.bulkAdd(employmentRecords);
+      await db.pendingCases.bulkAdd(pendingCases);
+      await db.vitalsSets.bulkAdd(vitalsSets);
+      await db.stateTransitions.bulkAdd(transitions);
+      await db.medications.bulkAdd(medications);
+      await db.allergyRecords.bulkAdd(allergies);
+      await db.conditions.bulkAdd(conditions);
+      await db.orderRecords.bulkAdd(orders);
+      await db.resultRecords.bulkAdd(results);
+      await db.immunizations.bulkAdd(immunizations);
+      await db.procedures.bulkAdd(procedures);
+      await db.programs.bulkAdd(programs);
+      await db.billingItems.bulkAdd(billingItems);
+      await db.attachments.bulkAdd(attachments);
+      await db.prototypeNotifications.bulkAdd(notifications);
+      await db.auditEvents.bulkAdd(auditEvents);
+      for (const range of DEFAULT_REFERENCE_RANGES) await db.referenceRanges.put(range);
+      for (const schedule of DEFAULT_VITALS_SCHEDULES) await db.vitalsSchedules.put(schedule);
+    },
+  );
+
+  seedCounters(5, 0);
+  seedIdentityCounters(100005, 5005);
+
+  function seededVitals(
+    id: string,
+    encounterId: string,
+    patientId: string,
+    recordedAt: number,
+    values: { temp: number; hr: number; rr: number; sbp: number; dbp: number; spo2: number; pain: number; glucose: number; o2?: boolean; avpu?: Avpu },
+  ): VitalsSet {
+    const news = scoreNews2({
+      respiratoryRate: values.rr,
+      spo2: values.spo2,
+      supplementalO2: Boolean(values.o2),
+      temperature: values.temp,
+      systolicBp: values.sbp,
+      heartRate: values.hr,
+      consciousness: values.avpu ?? "Alert",
+    });
+    return {
+      id,
+      encounterId,
+      patientId,
+      recordedAt,
+      temperature: values.temp,
+      heartRate: values.hr,
+      respiratoryRate: values.rr,
+      systolicBp: values.sbp,
+      diastolicBp: values.dbp,
+      spo2: values.spo2,
+      supplementalO2: Boolean(values.o2),
+      consciousness: values.avpu ?? "Alert",
+      painScore: values.pain,
+      bloodGlucose: values.glucose,
+      weightKg: 72,
+      heightCm: 172,
+      bmi: calculateBmi(72, 172),
+      gcsEye: values.avpu === "Voice" ? 3 : 4,
+      gcsVerbal: values.avpu === "Voice" ? 4 : 5,
+      gcsMotor: 6,
+      gcsTotal: values.avpu === "Voice" ? 13 : 15,
+      news2: news.score,
+      news2Breakdown: news.breakdown,
+      implausibleFields: implausibleFields({ temperature: values.temp, heartRate: values.hr, respiratoryRate: values.rr, systolicBp: values.sbp, diastolicBp: values.dbp, spo2: values.spo2, painScore: values.pain, bloodGlucose: values.glucose }),
+      source: "full",
+      voidedAt: null,
+      voidReason: null,
     };
-
-    if (bed) bed.encounterId = encounterId;
-
-    patients.push(patient);
-    encounters.push(encounter);
-    triages.push({
-      id: uuid(),
-      encounterId,
-      algorithm: "esi",
-      level: esi,
-      performedAt: arrivedAt + 3 * 60 * 1000,
-      note: null,
-    });
-    events.push({
-      id: uuid(),
-      encounterId,
-      type: "created",
-      content: { displayNumber, mode: "normal" },
-      attachmentBlob: null,
-      recordedAt: arrivedAt,
-    });
-    events.push({
-      id: uuid(),
-      encounterId,
-      type: "vitals",
-      content: {
-        bp: `${randInt(100, 140)}/${randInt(60, 90)}`,
-        hr: randInt(60, 110),
-        spo2: randInt(93, 100),
-        temp: (36 + Math.random() * 2).toFixed(1),
-      },
-      attachmentBlob: null,
-      recordedAt: arrivedAt + 5 * 60 * 1000,
-    });
   }
 
-  await db.beds.bulkAdd(beds);
-  await db.patients.bulkAdd(patients);
-  await db.encounters.bulkAdd(encounters);
-  await db.triageAssessments.bulkAdd(triages);
-  await db.clinicalEvents.bulkAdd(events);
+  function order(
+    id: string,
+    encounterId: string,
+    patientId: string,
+    orderType: OrderType,
+    name: string,
+    details: string,
+    priority: OrderRecord["priority"],
+    status: OrderStatus,
+    orderedAt: number,
+    actor: string,
+    requestedDepartment: string,
+  ): OrderRecord {
+    return {
+      id,
+      encounterId,
+      patientId,
+      orderType,
+      name,
+      details,
+      priority,
+      status,
+      orderedAt,
+      actor,
+      requestedDepartment,
+      clinicalIndication: details,
+      instructions: null,
+      statusUpdatedAt: orderedAt + 10 * 60_000,
+      statusUpdatedBy: actor,
+      cancelledAt: null,
+      cancellationReason: null,
+    };
+  }
 
-  for (const e of encounters) {
-    await writeAudit({
-      entityType: "encounter",
-      entityId: e.id,
-      action: "created",
-      newValue: e.chiefComplaint ?? "",
+  function result(
+    id: string,
+    encounterId: string,
+    patientId: string,
+    orderId: string | null,
+    name: string,
+    value: string,
+    unit: string | null,
+    referenceRange: string | null,
+    flag: ResultFlag,
+    resultedAt: number,
+    verifiedBy: string,
+    reviewStatus: ResultReviewStatus,
+    criticalActionTaken: string | null = null,
+  ): ResultRecord {
+    const acknowledged = reviewStatus === "acknowledged";
+    const reviewed = reviewStatus === "reviewed" || reviewStatus === "acknowledged" || reviewStatus === "action_required";
+    return {
+      id,
+      encounterId,
+      patientId,
+      orderId,
+      name,
+      value,
+      unit,
+      referenceRange,
+      flag,
+      resultedAt,
+      verifiedBy,
+      status: "final",
+      reviewStatus,
+      reviewedAt: reviewed ? resultedAt + 5 * 60_000 : null,
+      reviewedBy: reviewed ? verifiedBy : null,
+      acknowledgedAt: acknowledged ? resultedAt + 6 * 60_000 : null,
+      acknowledgedBy: acknowledged ? "Dr. Sami Rahal" : null,
+      criticalActionTaken,
+    };
+  }
+
+  function event(id: string, encounterId: string, type: ClinicalEvent["type"], recordedAt: number, content: Record<string, unknown>): ClinicalEvent {
+    return { id, encounterId, type, content, attachmentBlob: null, recordedAt };
+  }
+
+  function audit(
+    id: string,
+    entityType: string,
+    entityId: string,
+    action: string,
+    previousValue: string | null,
+    newValue: string | null,
+    timestamp: number,
+    patientId: string | null,
+    encounterId: string | null,
+  ): AuditEvent {
+    return {
+      id,
+      entityType,
+      entityId,
+      action,
+      previousValue,
+      newValue,
+      timestamp,
       mode: "normal",
-    });
+      actor: "Seed",
+      actorId: "seed-system",
+      demoRole: "administrator",
+      patientId,
+      encounterId,
+      metadata: { synthetic: true },
+    };
   }
-
-  await db.auditEvents.add({
-    id: uuid(),
-    entityType: "system",
-    entityId: "seed",
-    action: "seed_alert",
-    previousValue: null,
-    newValue: "Lab turnaround delayed 20+ min",
-    timestamp: Date.now(),
-    mode: "normal",
-  });
-
-  await ensureMockPatientHistory();
-  await ensurePerfectMockPatient();
-  await ensureClinicalFoundationSeeds();
-  await ensureDomainSeeds();
-  await ensureRegistrationProfileSeed();
-  await ensurePhaseOneSeedMetadata();
 }
 
 const PHASE_ONE_SEED_MARKER = "phase1_foundation_seed_v1";
@@ -1743,3 +2523,14 @@ function extractedNoteFor(i: number): string {
   ];
   return notes[i % notes.length];
 }
+
+// Retained for old local backups and manual debugging, but normal startup now
+// uses only ensureFivePatientDemoSeed so the active demo stays at five patients.
+void [
+  ensureMockPatientHistory,
+  ensurePerfectMockPatient,
+  ensureClinicalFoundationSeeds,
+  ensureDomainSeeds,
+  ensureRegistrationProfileSeed,
+  ensurePhaseOneSeedMetadata,
+];

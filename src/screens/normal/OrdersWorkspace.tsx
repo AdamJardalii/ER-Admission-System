@@ -5,7 +5,7 @@ import { ClinicalWorklist } from "../../components/ClinicalWorklist";
 import { ClinicalAuditHistory } from "../../components/ClinicalAuditHistory";
 import { StatusPill } from "../../components/DomainTab";
 import { TriageBadge } from "../../components/TriageBadge";
-import { addOrderRecord, transitionOrderRecordStatus } from "../../db/repo";
+import { addOrderRecord, administerMedication, transitionOrderRecordStatus } from "../../db/repo";
 import { isOrderOverdue, isOrderTerminal, resultReviewStatus } from "../../lib/clinicalWorkflow";
 import { orderOptionsFor } from "../../lib/clinicalCatalog";
 import { useNow } from "../../lib/useNow";
@@ -46,7 +46,7 @@ const ORDER_STATUSES: OrderStatus[] = [
   "patient_refused",
 ];
 
-const ORDER_ENTRY_TYPES = ORDER_TYPES.filter((type) => type !== "medication");
+const ORDER_ENTRY_TYPES = ORDER_TYPES;
 
 type OrderDraft = {
   encounterId: string;
@@ -395,7 +395,83 @@ function OrderEntryForm({ draft, encounters, patientById, orderableOptions, savi
 
 function OrderDetails({ order, result, history, patient, encounter, triage, busy, onAdvance, onCancel, onOpenChart }: { order: OrderRecord; result?: ResultRecord; history: AuditEvent[]; patient?: Patient; encounter?: Encounter; triage: TriageLevel | null; busy: boolean; onAdvance: () => void; onCancel: () => void; onOpenChart: () => void }) {
   const action = nextOrderAction(order, Boolean(result));
-  return <div className="space-y-4"><div><h2 className="text-lg font-semibold">{patient?.name ?? patient?.displayNumber ?? "Unknown patient"}</h2><p className="text-xs text-[var(--color-ink-secondary)]">{patient?.mrn ?? "No MRN"} | {encounter?.caseNumber ?? "No case"}</p><div className="mt-2 flex flex-wrap items-center gap-2"><TriageBadge level={triage} size="sm" /><span className="text-sm">{encounter?.currentLocationName ?? "Location unassigned"}</span>{encounter?.allergies.length ? <span className="text-sm font-semibold text-[var(--color-red-solid)]">Allergy: {encounter.allergies.join(", ")}</span> : <span className="text-sm text-[var(--color-ink-secondary)]">No encounter allergies</span>}</div></div><div className="clinical-detail-section"><h3>Order</h3><DetailRow label="Name" value={order.name} /><DetailRow label="Category" value={order.orderType.replace(/_/g, " ")} /><DetailRow label="Priority" value={order.priority} /><DetailRow label="Status" value={order.status.replace(/_/g, " ")} /><DetailRow label="Result state" value={result ? resultReviewStatus(result).replace(/_/g, " ") : "Not available"} /><DetailRow label="Ordered" value={formatDateTime(order.orderedAt)} /><DetailRow label="Ordered by" value={order.actor ?? "Not recorded"} /><DetailRow label="Department" value={order.requestedDepartment ?? departmentFor(order.orderType)} /><DetailRow label="Indication" value={order.clinicalIndication ?? "Not recorded"} /><DetailRow label="Instructions" value={order.instructions ?? order.details ?? "Not recorded"} /></div><ClinicalAuditHistory events={history} title="Order history" /><div className="flex flex-wrap gap-2">{action && <button type="button" disabled={busy} onClick={onAdvance} className="clinical-drawer-primary">{busy ? "Updating..." : action.label}</button>}{canCancel(order) && <button type="button" disabled={busy} onClick={onCancel} className="clinical-drawer-danger">Cancel order</button>}<button type="button" onClick={onOpenChart} className="clinical-row-secondary">Open patient chart</button></div></div>;
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2 className="text-lg font-semibold">{patient?.name ?? patient?.displayNumber ?? "Unknown patient"}</h2>
+        <p className="text-xs text-[var(--color-ink-secondary)]">{patient?.mrn ?? "No MRN"} | {encounter?.caseNumber ?? "No case"}</p>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <TriageBadge level={triage} size="sm" />
+          <span className="text-sm">{encounter?.currentLocationName ?? "Location unassigned"}</span>
+          {encounter?.allergies.length ? <span className="text-sm font-semibold text-[var(--color-red-solid)]">Allergy: {encounter.allergies.join(", ")}</span> : <span className="text-sm text-[var(--color-ink-secondary)]">No encounter allergies</span>}
+        </div>
+      </div>
+      <div className="clinical-detail-section">
+        <h3>Order</h3>
+        <DetailRow label="Name" value={order.name} />
+        <DetailRow label="Category" value={order.orderType.replace(/_/g, " ")} />
+        <DetailRow label="Priority" value={order.priority} />
+        <DetailRow label="Status" value={order.status.replace(/_/g, " ")} />
+        <DetailRow label="Result state" value={result ? resultReviewStatus(result).replace(/_/g, " ") : "Not available"} />
+        <DetailRow label="Ordered" value={formatDateTime(order.orderedAt)} />
+        <DetailRow label="Ordered by" value={order.actor ?? "Not recorded"} />
+        <DetailRow label="Department" value={order.requestedDepartment ?? departmentFor(order.orderType)} />
+        <DetailRow label="Indication" value={order.clinicalIndication ?? "Not recorded"} />
+        <DetailRow label="Instructions" value={order.instructions ?? order.details ?? "Not recorded"} />
+      </div>
+      {order.orderType === "medication" && order.status === "in_progress" && <MedicationAdministrationForm order={order} />}
+      <ClinicalAuditHistory events={history} title="Order history" />
+      <div className="flex flex-wrap gap-2">
+        {action && <button type="button" disabled={busy} onClick={onAdvance} className="clinical-drawer-primary">{busy ? "Updating..." : action.label}</button>}
+        {canCancel(order) && <button type="button" disabled={busy} onClick={onCancel} className="clinical-drawer-danger">Cancel order</button>}
+        <button type="button" onClick={onOpenChart} className="clinical-row-secondary">Open patient chart</button>
+      </div>
+    </div>
+  );
+}
+
+function MedicationAdministrationForm({ order }: { order: OrderRecord }) {
+  const mode = useAppStore((state) => state.mode);
+  const pushToast = useAppStore((state) => state.pushToast);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({ dose: "", route: "IV", response: "", reason: "", actor: "Demo Nurse" });
+
+  async function save() {
+    if (!form.dose.trim() && !form.reason.trim()) return;
+    setSaving(true);
+    try {
+      await administerMedication(order.encounterId, {
+        medicationOrderId: order.id,
+        medication: order.name,
+        prescribedDose: order.instructions ?? order.details ?? "",
+        administeredDose: form.dose.trim(),
+        route: form.route.trim(),
+        response: form.response.trim(),
+        notAdministeredReason: form.reason.trim() || null,
+        actor: form.actor.trim() || "Demo Nurse",
+      }, mode);
+      await transitionOrderRecordStatus(order.id, "completed", form.actor.trim() || "Demo Nurse", mode, form.reason.trim() || "Medication administration documented");
+      pushToast(form.reason.trim() ? "Medication non-administration documented" : "Medication administration recorded");
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : "Administration could not be recorded");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="clinical-detail-section">
+      <h3>Administration</h3>
+      <div className="clinical-drawer-form">
+        <label><span>Given dose</span><input value={form.dose} onChange={(event) => setForm({ ...form, dose: event.target.value })} placeholder="500 mg" /></label>
+        <label><span>Route</span><input value={form.route} onChange={(event) => setForm({ ...form, route: event.target.value })} /></label>
+        <label><span>Response</span><input value={form.response} onChange={(event) => setForm({ ...form, response: event.target.value })} placeholder="Tolerated, pain improved..." /></label>
+        <label><span>Administered by</span><input value={form.actor} onChange={(event) => setForm({ ...form, actor: event.target.value })} /></label>
+        <label className="col-span-2 max-[560px]:col-span-1"><span>Not given reason</span><input value={form.reason} onChange={(event) => setForm({ ...form, reason: event.target.value })} placeholder="Required only when not administered" /></label>
+      </div>
+      <button type="button" disabled={saving || (!form.dose.trim() && !form.reason.trim())} onClick={() => void save()} className="clinical-drawer-primary mt-3">{saving ? "Saving..." : form.reason.trim() ? "Record not given" : "Record administration"}</button>
+    </section>
+  );
 }
 
 function DetailRow({ label, value }: { label: string; value: string }) {
@@ -411,7 +487,7 @@ function nextOrderAction(order: OrderRecord, hasResult = false): { label: string
   }
   if (order.status === "specimen_pending") return { label: "Collect specimen", status: "specimen_collected" };
   if (order.status === "specimen_collected") return { label: "Start processing", status: "in_progress" };
-  if (order.status === "in_progress") return { label: "Complete", status: "completed" };
+  if (order.status === "in_progress") return order.orderType === "medication" ? null : { label: "Complete", status: "completed" };
   if (order.status === "result_available") return { label: "Open result", status: "reviewed", navigateToResults: true };
   return null;
 }

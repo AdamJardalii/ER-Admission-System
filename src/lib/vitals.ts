@@ -129,6 +129,67 @@ export function severityFor(
   return "normal";
 }
 
+// Live entry band used by the vitals console to color tiles as the nurse types.
+// These bands are NEWS2-aligned but intentionally distinct from severityFor():
+// they drive per-tile input styling (neutral/normal/amber/red), not the flowsheet.
+export type VitalBand = "neutral" | "normal" | "amber" | "red";
+
+export function bandFor(parameter: string, value: number | null): VitalBand {
+  if (value === null || Number.isNaN(value)) return "neutral";
+  switch (parameter) {
+    case "temperature":
+      if (value <= 35) return "red";
+      if (value <= 36) return "amber";
+      if (value <= 38) return "normal";
+      return "amber"; // 38.1 and above
+    case "heartRate":
+      if (value <= 40) return "red";
+      if (value <= 50) return "amber";
+      if (value <= 90) return "normal";
+      if (value <= 130) return "amber";
+      return "red";
+    case "respiratoryRate":
+      if (value <= 8) return "red";
+      if (value <= 11) return "amber";
+      if (value <= 20) return "normal";
+      if (value <= 24) return "amber";
+      return "red";
+    case "spo2":
+      if (value >= 96) return "normal";
+      if (value >= 92) return "amber"; // 92-95
+      return "red"; // 91 and below
+    case "systolicBp":
+      if (value <= 90) return "red";
+      if (value <= 110) return "amber";
+      if (value <= 219) return "normal";
+      return "red"; // 220 and above
+    case "diastolicBp":
+      // Not NEWS2-scored; use a plausibility-only band so the tile stays informative.
+      if (value < 40 || value > 120) return "red";
+      if (value < 60 || value > 90) return "amber";
+      return "normal";
+    case "painScore":
+      if (value <= 3) return "normal";
+      if (value <= 6) return "amber";
+      return "red"; // 7-10
+    case "bloodGlucose":
+      if (value < 54 || value > 250) return "red";
+      if (value >= 70 && value <= 180) return "normal";
+      return "amber";
+    default:
+      return "neutral";
+  }
+}
+
+// Live NEWS2 risk band for the section-header chip. A single parameter scoring 3
+// escalates an otherwise-low score to medium, per NEWS2 guidance.
+export function news2RiskBand(score: number, breakdown: News2Breakdown): "low" | "medium" | "high" {
+  if (score >= 7) return "high";
+  const hasSingleThree = Object.values(breakdown).some((value) => value >= 3);
+  if (score >= 5 || hasSingleThree) return "medium";
+  return "low";
+}
+
 export function implausibleFields(values: Partial<Record<string, number | null>>, ranges: ReferenceRange[] = DEFAULT_REFERENCE_RANGES): string[] {
   return Object.entries(values)
     .filter(([, value]) => value !== null && value !== undefined)
@@ -137,6 +198,29 @@ export function implausibleFields(values: Partial<Record<string, number | null>>
       return Boolean(range && (value! < range.plausibleMin || value! > range.plausibleMax));
     })
     .map(([key]) => key);
+}
+
+export interface FlowsheetColumn {
+  key: string;
+  label: string;
+  set: VitalsSet;
+}
+
+// Collapse sets that share a displayed minute into a single flowsheet column,
+// keeping the most recent set's values for that minute. Guarantees no two columns
+// show the same timestamp label, and preserves chronological (ascending) order.
+// Fixes the duplicate-timestamp-column bug when two sets land in the same minute.
+export function dedupeFlowsheetColumns(sets: VitalsSet[]): FlowsheetColumn[] {
+  const ordered = [...sets].sort((a, b) => a.recordedAt - b.recordedAt);
+  const byMinute = new Map<string, FlowsheetColumn>();
+  for (const set of ordered) {
+    const label = new Date(set.recordedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    // Key by full minute (date + HH:MM) so the same clock time on different days
+    // stays separate; later sets overwrite earlier ones within the same minute.
+    const key = `${new Date(set.recordedAt).toDateString()} ${label}`;
+    byMinute.set(key, { key, label, set });
+  }
+  return [...byMinute.values()];
 }
 
 export function latestVitals(sets: VitalsSet[]): VitalsSet | null {

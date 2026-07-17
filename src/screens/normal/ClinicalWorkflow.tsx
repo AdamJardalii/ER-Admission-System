@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -21,7 +21,17 @@ import {
   updateOrderStatus,
 } from "../../db/repo";
 import { TriageBadge } from "../../components/TriageBadge";
-import { orderOptionsFor, TREATMENT_OPTIONS } from "../../lib/clinicalCatalog";
+import { DropdownSelect } from "../../components/FloatingDropdown";
+import {
+  ASSESSMENT_EXAM_OPTIONS,
+  ASSESSMENT_HISTORY_OPTIONS,
+  ASSESSMENT_IMPRESSION_OPTIONS,
+  ASSESSMENT_PLAN_OPTIONS,
+  ASSESSMENT_SYMPTOM_OPTIONS,
+  orderOptionsFor,
+  TREATMENT_OPTIONS,
+} from "../../lib/clinicalCatalog";
+import { dispositionWorkflowSteps, workflowStatusForEncounter } from "../../domain/encounterStateMachine";
 import { useAppStore } from "../../store/useAppStore";
 import type {
   ClinicalEvent,
@@ -88,19 +98,46 @@ export function AssessmentWorkflow({ encounterId }: { encounterId: string }) {
           </div>
         </div>
         <div className="grid grid-cols-2 gap-2 max-[560px]:grid-cols-1">
-          <Field label="Symptoms">
-            <textarea className={inputClass} rows={2} value={form.symptoms} onChange={(event) => setForm({ ...form, symptoms: event.target.value })} />
-          </Field>
-          <Field label="Relevant history">
-            <textarea className={inputClass} rows={2} value={form.medicalHistory} onChange={(event) => setForm({ ...form, medicalHistory: event.target.value })} />
-          </Field>
-          <Field label="Physical examination">
-            <textarea className={inputClass} rows={2} value={form.examination} onChange={(event) => setForm({ ...form, examination: event.target.value })} />
-          </Field>
-          <Field label="Impression / possible diagnoses">
-            <textarea className={inputClass} rows={2} value={form.impression} onChange={(event) => setForm({ ...form, impression: event.target.value })} />
-          </Field>
+          <AssessmentPickField
+            label="Symptoms"
+            value={form.symptoms}
+            options={ASSESSMENT_SYMPTOM_OPTIONS}
+            placeholder="Add symptom template"
+            onChange={(symptoms) => setForm({ ...form, symptoms })}
+          />
+          <AssessmentPickField
+            label="Relevant history"
+            value={form.medicalHistory}
+            options={ASSESSMENT_HISTORY_OPTIONS}
+            placeholder="Add history item"
+            onChange={(medicalHistory) => setForm({ ...form, medicalHistory })}
+          />
+          <AssessmentPickField
+            label="Physical examination"
+            value={form.examination}
+            options={ASSESSMENT_EXAM_OPTIONS}
+            placeholder="Add exam finding"
+            onChange={(examination) => setForm({ ...form, examination })}
+          />
+          <AssessmentPickField
+            label="Impression / possible diagnoses"
+            value={form.impression}
+            options={ASSESSMENT_IMPRESSION_OPTIONS}
+            placeholder="Add impression"
+            required
+            onChange={(impression) => setForm({ ...form, impression })}
+          />
           <Field label="Clinical plan" className="col-span-2 max-[560px]:col-span-1">
+            <div className="mb-1">
+              <DropdownSelect
+                value=""
+                options={ASSESSMENT_PLAN_OPTIONS}
+                placeholder="Add plan action"
+                onChange={(value) => value && setForm({ ...form, plan: appendAssessmentPhrase(form.plan, value) })}
+                className={inputClass}
+                ariaLabel="Add clinical plan action"
+              />
+            </div>
             <textarea className={inputClass} rows={2} value={form.plan} onChange={(event) => setForm({ ...form, plan: event.target.value })} />
           </Field>
           <Field label="Recorded by">
@@ -131,6 +168,45 @@ export function AssessmentWorkflow({ encounterId }: { encounterId: string }) {
       </TimelinePanel>
     </div>
   );
+}
+
+function AssessmentPickField({
+  label,
+  value,
+  options,
+  placeholder,
+  required = false,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: string[];
+  placeholder: string;
+  required?: boolean;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <Field label={label} required={required}>
+      <div className="mb-1">
+        <DropdownSelect
+          value=""
+          options={options}
+          placeholder={placeholder}
+          onChange={(option) => option && onChange(appendAssessmentPhrase(value, option))}
+          className={inputClass}
+          ariaLabel={placeholder}
+        />
+      </div>
+      <textarea className={inputClass} rows={2} value={value} onChange={(event) => onChange(event.target.value)} />
+    </Field>
+  );
+}
+
+function appendAssessmentPhrase(current: string, phrase: string) {
+  const trimmed = current.trim();
+  if (!trimmed) return phrase;
+  if (trimmed.toLowerCase().includes(phrase.toLowerCase())) return current;
+  return `${trimmed}\n${phrase}`;
 }
 
 const ORDER_TYPES: OrderType[] = ["laboratory", "imaging", "medication", "procedure", "consultation", "blood_product", "observation", "admission", "transfer", "monitoring", "other"];
@@ -433,22 +509,6 @@ const DISPOSITIONS: { value: Disposition; label: string }[] = [
   { value: "unknown_status", label: "Unknown status" },
 ];
 
-function dispositionSteps(disposition: Disposition | null): { label: string; value: string; closes?: boolean }[] {
-  if (["ward", "icu", "operating_room", "admitted"].includes(disposition ?? "")) return [
-    { label: "Specialty accepted", value: "specialty_accepted" }, { label: "Bed requested", value: "bed_requested" }, { label: "Bed ready", value: "bed_ready" }, { label: "Handoff complete", value: "handoff_complete" }, { label: "Departed ER", value: "departed_er", closes: true },
-  ];
-  if (disposition === "transferred") return [
-    { label: "Transfer accepted", value: "transfer_accepted" }, { label: "Transport requested", value: "transport_requested" }, { label: "Handoff complete", value: "handoff_complete" }, { label: "Patient departed", value: "departed", closes: true }, { label: "Arrival confirmed", value: "arrival_confirmed", closes: true },
-  ];
-  if (disposition === "discharged") return [
-    { label: "Prescription ready", value: "prescription_ready" }, { label: "Instructions explained", value: "instructions_explained" }, { label: "Follow-up arranged", value: "follow_up_arranged" }, { label: "Patient departed", value: "departed", closes: true },
-  ];
-  if (disposition === "observation") return [
-    { label: "Monitoring started", value: "monitoring_started" }, { label: "Repeat tests due", value: "repeat_tests_due" }, { label: "New decision required", value: "new_decision_required" },
-  ];
-  return [{ label: "Outcome confirmed", value: "confirmed", closes: true }];
-}
-
 export function DispositionWorkflow({ encounterId }: { encounterId: string }) {
   const view = useEncounterView(encounterId);
   const events = useClinicalEvents(encounterId);
@@ -457,20 +517,70 @@ export function DispositionWorkflow({ encounterId }: { encounterId: string }) {
   const [selection, setSelection] = useState<Disposition>(view?.encounter.disposition ?? "discharged");
   const [details, setDetails] = useState("");
   const [actor, setActor] = useState(actorDefault(view?.encounter.currentProvider));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [handoff, setHandoff] = useState({
+    situation: "",
+    background: "",
+    assessment: "",
+    recommendation: "",
+    receivingUnit: "",
+    receivingClinician: "",
+  });
   const timeline = events.filter((event) => event.type === "disposition" || event.type === "disposition_status");
+  const latestDecisionAt = timeline
+    .filter((event) => event.type === "disposition")
+    .reduce((latest, event) => Math.max(latest, event.recordedAt), 0);
   const activeDisposition = view?.encounter.disposition ?? null;
-  const steps = activeDisposition ? dispositionSteps(activeDisposition) : [];
+  const steps = activeDisposition ? dispositionWorkflowSteps(activeDisposition) : [];
   const completedValues = new Set(
     timeline
+      .filter((event) => event.type === "disposition_status" && event.recordedAt >= latestDecisionAt)
       .map((event) => eventContent<{ status?: string }>(event).status)
       .filter((status): status is string => Boolean(status)),
   );
   const nextStepIndex = steps.findIndex((step) => !completedValues.has(step.value));
-  const encounterClosed = steps.some((step) => step.closes && completedValues.has(step.value));
+  const nextStep = nextStepIndex >= 0 ? steps[nextStepIndex] : null;
+  const encounterClosed = Boolean(view?.encounter.closedAt);
+  const workflowStatus = view ? workflowStatusForEncounter(view.encounter) : null;
+
+  useEffect(() => {
+    if (view?.encounter.disposition) setSelection(view.encounter.disposition);
+  }, [view?.encounter.disposition]);
 
   async function decide() {
-    await setDispositionDecision(encounterId, selection, actor, details, mode);
-    pushToast("Disposition decision recorded; encounter remains open until departure");
+    setBusy(true);
+    setError(null);
+    try {
+      await setDispositionDecision(encounterId, selection, actor, details, mode);
+      pushToast("Disposition decision recorded; encounter remains open until departure");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Disposition decision could not be recorded.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function advance() {
+    if (!nextStep) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await updateDispositionProgress(
+        encounterId,
+        nextStep.value,
+        actor,
+        details,
+        Boolean(nextStep.closesEncounter),
+        mode,
+        nextStep.requiresHandoff ? { handoff } : undefined,
+      );
+      pushToast(nextStep.closesEncounter ? "Encounter closed after departure" : `${nextStep.label} recorded`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Disposition step could not be completed.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -480,8 +590,9 @@ export function DispositionWorkflow({ encounterId }: { encounterId: string }) {
           <Field label="Disposition decision" required><select className={inputClass} value={selection} onChange={(event) => setSelection(event.target.value as Disposition)}>{DISPOSITIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></Field>
           <Field label="Destination / instructions / reason"><input className={inputClass} value={details} onChange={(event) => setDetails(event.target.value)} /></Field>
           <Field label="Decided by"><input className={inputClass} value={actor} onChange={(event) => setActor(event.target.value)} /></Field>
-          <button onClick={() => void decide()} className="h-[34px] rounded-md bg-[var(--color-primary)] px-3 text-sm font-semibold text-white">Record decision</button>
+          <button disabled={busy || !actor.trim()} onClick={() => void decide()} className="h-[34px] rounded-md bg-[var(--color-primary)] px-3 text-sm font-semibold text-white disabled:opacity-50">{busy ? "Saving..." : "Record decision"}</button>
         </div>
+        {error && <p role="alert" className="mt-2 text-xs font-semibold text-[var(--color-red-text)]">{error}</p>}
       </section>
       {activeDisposition && (
         <section className="card space-y-3">
@@ -493,7 +604,7 @@ export function DispositionWorkflow({ encounterId }: { encounterId: string }) {
               <span className="rounded bg-[var(--color-green-tint)] px-2 py-1 text-xs font-semibold text-[var(--color-green-text)]">Complete — patient departed</span>
             ) : (
               <span className="rounded bg-[var(--color-yellow-tint)] px-2 py-1 text-xs font-semibold text-[var(--color-yellow-text)]">
-                Waiting on: {nextStepIndex >= 0 ? steps[nextStepIndex].label.toLowerCase() : "next step"} · at {view?.encounter.currentLocationName ?? "unassigned"}
+                {workflowStatus?.replace(/_/g, " ")} | Next: {nextStep?.label.toLowerCase() ?? "complete"} | {view?.encounter.currentLocationName ?? "location unassigned"}
               </span>
             )}
           </div>
@@ -512,25 +623,26 @@ export function DispositionWorkflow({ encounterId }: { encounterId: string }) {
             })}
           </ol>
 
-          <div className="flex flex-wrap gap-2 border-t border-[var(--color-border)] pt-2">
-            {steps.map((step) => {
-              const done = completedValues.has(step.value);
-              return (
-                <button
-                  key={step.value}
-                  disabled={done}
-                  onClick={() => void updateDispositionProgress(encounterId, step.value, actor, details, Boolean(step.closes), mode)}
-                  className={`rounded-md border px-2.5 py-1.5 text-xs font-semibold ${
-                    done
-                      ? "border-[var(--color-border)] bg-[var(--color-surface-muted)] text-[var(--color-ink-secondary)]"
-                      : "border-[var(--color-border)] hover:border-[var(--color-primary)]"
-                  }`}
-                >
-                  {done ? `✓ ${step.label}` : step.label}
-                </button>
-              );
-            })}
-          </div>
+          {nextStep?.requiresHandoff && (
+            <div className="grid grid-cols-2 gap-2 border-t border-[var(--color-border)] pt-2 max-[720px]:grid-cols-1">
+              <Field label="Situation" required><input className={inputClass} value={handoff.situation} onChange={(event) => setHandoff({ ...handoff, situation: event.target.value })} placeholder="Current problem and disposition" /></Field>
+              <Field label="Background" required><input className={inputClass} value={handoff.background} onChange={(event) => setHandoff({ ...handoff, background: event.target.value })} placeholder="Relevant history and allergies" /></Field>
+              <Field label="Assessment" required><input className={inputClass} value={handoff.assessment} onChange={(event) => setHandoff({ ...handoff, assessment: event.target.value })} placeholder="Findings, vitals, results" /></Field>
+              <Field label="Recommendation" required><input className={inputClass} value={handoff.recommendation} onChange={(event) => setHandoff({ ...handoff, recommendation: event.target.value })} placeholder="Monitoring and next actions" /></Field>
+              <Field label="Receiving unit" required><input className={inputClass} value={handoff.receivingUnit} onChange={(event) => setHandoff({ ...handoff, receivingUnit: event.target.value })} placeholder="ICU, ward, facility" /></Field>
+              <Field label="Receiving clinician" required><input className={inputClass} value={handoff.receivingClinician} onChange={(event) => setHandoff({ ...handoff, receivingClinician: event.target.value })} placeholder="Name / role" /></Field>
+            </div>
+          )}
+
+          {!encounterClosed && nextStep && (
+            <div className="flex items-center justify-between gap-3 border-t border-[var(--color-border)] pt-2">
+              <p className="text-xs text-[var(--color-ink-secondary)]">Only the next valid workflow action is available.</p>
+              <button type="button" disabled={busy} onClick={() => void advance()} className="rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50">
+                {busy ? "Saving..." : nextStep.label}
+              </button>
+            </div>
+          )}
+          {error && <p role="alert" className="text-xs font-semibold text-[var(--color-red-text)]">{error}</p>}
         </section>
       )}
       <TimelinePanel title="Disposition timeline" empty="No disposition decision recorded yet.">
@@ -560,8 +672,28 @@ function FlowNode({ label, state }: { label: string; state: "done" | "next" | "p
   );
 }
 
-export function TriageHistory({ encounterId }: { encounterId: string }) {
+export function TriageHistory({ encounterId, compact = false }: { encounterId: string; compact?: boolean }) {
   const assessments = useTriageAssessments(encounterId);
+  if (compact) {
+    return (
+      <section className="triage-history-panel" aria-label="Triage history records">
+        {assessments.length === 0 ? (
+          <p>No triage assessment has been recorded.</p>
+        ) : (
+          <ol>
+            {assessments.map((assessment, index) => (
+              <li key={assessment.id}>
+                <time>{new Date(assessment.performedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+                <span><TriageBadge level={assessment.level} size="sm" /></span>
+                <strong>{index === 0 ? "Current" : "Previous"}</strong>
+                <span>{assessment.note || `${assessment.algorithm.toUpperCase()} assessment`}</span>
+              </li>
+            ))}
+          </ol>
+        )}
+      </section>
+    );
+  }
   return (
     <section className="triage-section">
       <div className="flex items-center justify-between gap-2">

@@ -16,6 +16,7 @@ import {
 import { addOrderRecord } from "../db/repo";
 import { orderOptionsFor, FREQUENCY_OPTIONS, ROUTE_OPTIONS } from "../lib/clinicalCatalog";
 import { useAppStore } from "../store/useAppStore";
+import { DropdownSelect, FloatingDropdown } from "./FloatingDropdown";
 import type { EncounterView } from "../db/hooks";
 import type { OrderRecord, OrderType } from "../types";
 
@@ -49,6 +50,7 @@ export function PatientQuickActions({
   const [open, setOpen] = useState(false);
   const [quickOrderType, setQuickOrderType] = useState<QuickOrderType | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const menuContentRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const patientLabel = view.patient.name ?? view.patient.displayNumber;
   const active = !TERMINAL_STATES.has(view.encounter.state);
@@ -56,7 +58,8 @@ export function PatientQuickActions({
   useEffect(() => {
     if (!open) return undefined;
     const onPointer = (event: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(event.target as Node)) setOpen(false);
+      const target = event.target as Node;
+      if (!menuRef.current?.contains(target) && !menuContentRef.current?.contains(target)) setOpen(false);
     };
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -110,10 +113,15 @@ export function PatientQuickActions({
           {compact ? <MoreVertical size={16} /> : <><MoreVertical size={15} />{label}</>}
         </button>
         {open && (
-          <div
+          <FloatingDropdown
+            open={open}
+            triggerRef={triggerRef}
+            contentRef={menuContentRef}
+            align="end"
+            minWidth={256}
             role="menu"
             aria-label={`Actions for ${patientLabel}`}
-            className="absolute right-0 top-full z-50 mt-1 w-64 overflow-hidden rounded-md border border-[var(--color-border)] bg-white py-1 text-sm shadow-lg"
+            className="w-64 overflow-hidden rounded-md border border-[var(--color-border)] bg-white py-1 text-sm shadow-lg"
             onClick={(event) => event.stopPropagation()}
           >
             <MenuGroup label="Open">
@@ -151,7 +159,7 @@ export function PatientQuickActions({
                 <MenuItem icon={<UserRound size={15} />} onClick={() => openTab("Personal")}>Complete registration</MenuItem>
               </MenuGroup>
             )}
-          </div>
+          </FloatingDropdown>
         )}
       </div>
       {quickOrderType && (
@@ -263,10 +271,14 @@ export function QuickOrderDrawer({
               {orderType === "medication" ? "Medication *" : "Order *"}
             </span>
             {catalog.length ? (
-              <select value={name} onChange={(event) => setName(event.target.value)} className="w-full rounded-md border border-[var(--color-border)] px-2 py-2 text-sm">
-                <option value="">Select {orderType.replace(/_/g, " ")}</option>
-                {catalog.map((option) => <option key={option} value={option}>{option}</option>)}
-              </select>
+              <DropdownSelect
+                value={name}
+                options={catalog}
+                placeholder={`Select ${orderType.replace(/_/g, " ")}`}
+                onChange={setName}
+                className="w-full rounded-md border border-[var(--color-border)] px-2 py-2 text-sm"
+                ariaLabel={orderType === "medication" ? "Medication" : "Order"}
+              />
             ) : (
               <input value={name} onChange={(event) => setName(event.target.value)} className="w-full rounded-md border border-[var(--color-border)] px-2 py-2 text-sm" />
             )}
@@ -279,25 +291,39 @@ export function QuickOrderDrawer({
               </label>
               <label className="block">
                 <span className="mb-1 block text-xs font-semibold text-[var(--color-ink-secondary)]">Route</span>
-                <select value={route} onChange={(event) => setRoute(event.target.value)} className="w-full rounded-md border border-[var(--color-border)] px-2 py-2 text-sm">
-                  {ROUTE_OPTIONS.map((option) => <option key={option}>{option}</option>)}
-                </select>
+                <DropdownSelect
+                  value={route}
+                  options={ROUTE_OPTIONS}
+                  onChange={setRoute}
+                  className="w-full rounded-md border border-[var(--color-border)] px-2 py-2 text-sm"
+                  ariaLabel="Route"
+                />
               </label>
               <label className="col-span-2 block">
                 <span className="mb-1 block text-xs font-semibold text-[var(--color-ink-secondary)]">Frequency</span>
-                <select value={frequency} onChange={(event) => setFrequency(event.target.value)} className="w-full rounded-md border border-[var(--color-border)] px-2 py-2 text-sm">
-                  {FREQUENCY_OPTIONS.map((option) => <option key={option}>{option}</option>)}
-                </select>
+                <DropdownSelect
+                  value={frequency}
+                  options={FREQUENCY_OPTIONS}
+                  onChange={setFrequency}
+                  className="w-full rounded-md border border-[var(--color-border)] px-2 py-2 text-sm"
+                  ariaLabel="Frequency"
+                />
               </label>
             </div>
           )}
           <label className="block">
             <span className="mb-1 block text-xs font-semibold text-[var(--color-ink-secondary)]">Priority</span>
-            <select value={priority} onChange={(event) => setPriority(event.target.value as OrderRecord["priority"])} className="w-full rounded-md border border-[var(--color-border)] px-2 py-2 text-sm">
-              <option value="routine">Routine</option>
-              <option value="urgent">Urgent</option>
-              <option value="stat">STAT</option>
-            </select>
+            <DropdownSelect
+              value={priority}
+              options={[
+                { value: "routine", label: "Routine" },
+                { value: "urgent", label: "Urgent" },
+                { value: "stat", label: "STAT" },
+              ]}
+              onChange={(value) => setPriority(value as OrderRecord["priority"])}
+              className="w-full rounded-md border border-[var(--color-border)] px-2 py-2 text-sm"
+              ariaLabel="Priority"
+            />
           </label>
           <label className="block">
             <span className="mb-1 block text-xs font-semibold text-[var(--color-ink-secondary)]">Instructions</span>

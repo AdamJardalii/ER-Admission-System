@@ -5,7 +5,9 @@ import {
   TERMINAL_ENCOUNTER_STATUSES,
   assertEncounterTransition,
   canTransitionEncounter,
+  dispositionWorkflowSteps,
   encounterTransitions,
+  initialStatusForDisposition,
   isTerminalEncounterStatus,
   legacyStateForWorkflowStatus,
   workflowStatusFromLegacy,
@@ -53,4 +55,52 @@ test("legacy UI states map to canonical workflow states without changing old scr
   assert.equal(workflowStatusFromLegacy("resuscitation"), "ROOMED");
   assert.equal(workflowStatusFromLegacy("closed", "admitted"), "DEPARTED_ADMITTED");
   assert.equal(legacyStateForWorkflowStatus("BED_ASSIGNED"), "waiting_for_bed");
+});
+
+test("admission disposition follows acceptance, bed, boarding, handoff, and departure", () => {
+  assert.equal(initialStatusForDisposition("icu"), "ADMIT_REQUESTED");
+  const steps = dispositionWorkflowSteps("icu");
+  assert.deepEqual(steps.map((step) => step.toStatus), [
+    "ACCEPTANCE_PENDING",
+    "BED_ASSIGNED",
+    "BOARDING",
+    "HANDOFF_PENDING",
+    "DEPARTED_ADMITTED",
+  ]);
+  const path = ["ADMIT_REQUESTED", ...steps.map((step) => step.toStatus)];
+  for (let index = 1; index < path.length; index += 1) {
+    assert.equal(canTransitionEncounter(path[index - 1], path[index]), true);
+  }
+  assert.equal(steps.find((step) => step.value === "handoff_complete")?.requiresHandoff, true);
+  assert.equal(steps.at(-1)?.closesEncounter, true);
+});
+
+test("transfer requires handoff before departure", () => {
+  assert.equal(initialStatusForDisposition("transferred"), "TRANSFER_PENDING");
+  const steps = dispositionWorkflowSteps("transferred");
+  assert.deepEqual(steps.map((step) => step.toStatus), [
+    "HANDOFF_PENDING",
+    "READY_FOR_DEPARTURE",
+    "DEPARTED_TRANSFERRED",
+  ]);
+  assert.equal(steps[0].requiresHandoff, true);
+});
+
+test("discharge documents instructions and follow-up before closing", () => {
+  assert.equal(initialStatusForDisposition("discharged"), "DISCHARGE_PENDING");
+  const steps = dispositionWorkflowSteps("discharged");
+  assert.deepEqual(steps.map((step) => step.value), [
+    "instructions_explained",
+    "follow_up_arranged",
+    "ready_for_departure",
+    "departed",
+  ]);
+  assert.equal(steps[2].toStatus, "READY_FOR_DEPARTURE");
+  assert.equal(steps[3].toStatus, "DEPARTED_DISCHARGED");
+  assert.equal(canTransitionEncounter(steps[2].toStatus, steps[3].toStatus), true);
+});
+
+test("unknown disposition remains open for review", () => {
+  assert.equal(initialStatusForDisposition("unknown_status"), null);
+  assert.equal(dispositionWorkflowSteps("unknown_status")[0].closesEncounter, undefined);
 });

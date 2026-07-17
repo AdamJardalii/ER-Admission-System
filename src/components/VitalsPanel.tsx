@@ -1,21 +1,29 @@
-import { useId, useMemo, useState } from "react";
-import { Activity, ChevronDown, HeartPulse, Save } from "lucide-react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { Activity, ChartLine, ChevronDown, Check, CopyPlus, HeartPulse, Save } from "lucide-react";
 import { deleteVitalsSet, recordVitalsSet, type VitalsInput } from "../db/repo";
 import { useAppStore } from "../store/useAppStore";
+import { DropdownSelect } from "./FloatingDropdown";
 import {
   DEFAULT_REFERENCE_RANGES,
   advisoryTextForVitals,
+  bandFor,
+  dedupeFlowsheetColumns,
   esiHintForVitals,
   formatAgo,
   intervalForTriage,
   isVitalsOverdue,
   latestVitals,
+  news2RiskBand,
   previousVitals,
+  scoreNews2,
   severityFor,
+  type VitalBand,
 } from "../lib/vitals";
 import type { Avpu, TriageLevel, VitalsSet } from "../types";
 
 const inputClass = "min-h-10 w-full rounded-md border border-[var(--color-border)] px-2.5 py-1.5 text-sm outline-none";
+
+const AVPU_OPTIONS: Avpu[] = ["Alert", "Voice", "Pain", "Unresponsive"];
 
 const FULL_FIELDS: FieldSpec[] = [
   { key: "temperature", label: "Temp", unit: "C", placeholder: "36-37.9", step: "0.1" },
@@ -37,7 +45,7 @@ const CRISIS_FIELDS: FieldSpec[] = [
   { key: "systolicBp", label: "SBP", unit: "mmHg", placeholder: "100-140" },
 ];
 
-type NumericKey = Exclude<keyof VitalsInput, "supplementalO2" | "consciousness" | "source">;
+type NumericKey = Exclude<keyof VitalsInput, "supplementalO2" | "consciousness" | "source" | "gcsTotal">;
 
 interface FieldSpec {
   key: NumericKey;
@@ -176,12 +184,13 @@ export function VitalsCaptureForm({
             </label>
             <label className="w-[150px] max-[440px]:flex-1">
               <span className="mb-1 block text-xs font-bold uppercase text-[var(--color-ink-secondary)]">AVPU</span>
-              <select value={consciousness} onChange={(event) => setConsciousness(event.target.value as Avpu)} className={inputClass}>
-                <option>Alert</option>
-                <option>Voice</option>
-                <option>Pain</option>
-                <option>Unresponsive</option>
-              </select>
+              <DropdownSelect
+                value={consciousness}
+                options={AVPU_OPTIONS}
+                onChange={(value) => setConsciousness(value as Avpu)}
+                className={inputClass}
+                ariaLabel="AVPU"
+              />
             </label>
             <button
               type="button"
@@ -222,12 +231,13 @@ export function VitalsCaptureForm({
       {compact && (
         <label>
           <span className="mb-1 block text-xs font-bold uppercase text-[var(--color-ink-secondary)]">AVPU</span>
-          <select value={consciousness} onChange={(event) => setConsciousness(event.target.value as Avpu)} className={`${inputClass} min-h-14 text-lg font-semibold`}>
-            <option>Alert</option>
-            <option>Voice</option>
-            <option>Pain</option>
-            <option>Unresponsive</option>
-          </select>
+          <DropdownSelect
+            value={consciousness}
+            options={AVPU_OPTIONS}
+            onChange={(value) => setConsciousness(value as Avpu)}
+            className={`${inputClass} min-h-14 text-lg font-semibold`}
+            ariaLabel="AVPU"
+          />
         </label>
       )}
 
@@ -291,48 +301,538 @@ export function VitalsHeader({ sets, triage, location }: { sets: VitalsSet[]; tr
   );
 }
 
-export function CurrentVitalsSummary({ sets, recording, onRecord }: { sets: VitalsSet[]; recording: boolean; onRecord: () => void }) {
-  const current = latestVitals(sets);
-  const values = [
-    { label: "BP", value: current ? `${current.systolicBp ?? "-"}/${current.diastolicBp ?? "-"}` : "-/-", unit: "mmHg", severity: severityFor("systolicBp", current?.systolicBp ?? null) },
-    { label: "Heart rate", value: current?.heartRate ?? "-", unit: "bpm", severity: severityFor("heartRate", current?.heartRate ?? null) },
-    { label: "Respiratory rate", value: current?.respiratoryRate ?? "-", unit: "/min", severity: severityFor("respiratoryRate", current?.respiratoryRate ?? null) },
-    { label: "SpO2", value: current?.spo2 ?? "-", unit: "%", severity: severityFor("spo2", current?.spo2 ?? null) },
-    { label: "Temperature", value: current?.temperature ?? "-", unit: "C", severity: severityFor("temperature", current?.temperature ?? null) },
-    { label: "Weight", value: current?.weightKg ?? "-", unit: "kg", severity: "normal" },
-    { label: "Height", value: current?.heightCm ?? "-", unit: "cm", severity: "normal" },
-    { label: "BMI", value: current?.bmi ?? "-", unit: "kg/m2", severity: "normal" },
-    { label: "Pain", value: current?.painScore ?? "-", unit: "/10", severity: severityFor("painScore", current?.painScore ?? null) },
-  ];
+// Eight NEWS2-relevant vitals shown as tiles in the console. Each drives a large
+// numeric input, a live band color, a normal-range hint and a per-vital sparkline.
+const CONSOLE_TILES: ConsoleTileSpec[] = [
+  { key: "temperature", label: "Temp", unit: "C", hint: "36.1-38", step: "0.1" },
+  { key: "heartRate", label: "Heart rate", unit: "bpm", hint: "51-90" },
+  { key: "respiratoryRate", label: "Resp rate", unit: "/min", hint: "12-20" },
+  { key: "spo2", label: "SpO2", unit: "%", hint: "96-100" },
+  { key: "systolicBp", label: "Systolic BP", unit: "mmHg", hint: "111-219" },
+  { key: "diastolicBp", label: "Diastolic BP", unit: "mmHg", hint: "60-90" },
+  { key: "painScore", label: "Pain", unit: "/10", hint: "0-3" },
+  { key: "bloodGlucose", label: "Glucose", unit: "mg/dL", hint: "70-180" },
+];
+
+interface ConsoleTileSpec {
+  key: ConsoleKey;
+  label: string;
+  unit: string;
+  hint: string;
+  step?: string;
+}
+
+type ConsoleKey =
+  | "temperature"
+  | "heartRate"
+  | "respiratoryRate"
+  | "spo2"
+  | "systolicBp"
+  | "diastolicBp"
+  | "painScore"
+  | "bloodGlucose";
+
+type VitalGraphKey = ConsoleKey | "news2";
+
+const VITAL_GRAPH_PARAMETERS: { key: VitalGraphKey; label: string; unit: string }[] = [
+  { key: "heartRate", label: "Heart rate", unit: "bpm" },
+  { key: "systolicBp", label: "Systolic BP", unit: "mmHg" },
+  { key: "diastolicBp", label: "Diastolic BP", unit: "mmHg" },
+  { key: "spo2", label: "SpO2", unit: "%" },
+  { key: "respiratoryRate", label: "Respiratory rate", unit: "/min" },
+  { key: "temperature", label: "Temperature", unit: "C" },
+  { key: "painScore", label: "Pain score", unit: "/10" },
+  { key: "bloodGlucose", label: "Blood glucose", unit: "mg/dL" },
+  { key: "news2", label: "NEWS2", unit: "" },
+];
+
+const AVPU_SEGMENTS: { value: Avpu; short: string }[] = [
+  { value: "Alert", short: "A" },
+  { value: "Voice", short: "V" },
+  { value: "Pain", short: "P" },
+  { value: "Unresponsive", short: "U" },
+];
+
+// Consolidated vitals view: replaces the old summary card + input row + trends.
+// Tile grid, live validation, live NEWS2, secondary controls, and a compact
+// flowsheet — all in roughly one viewport. On the Vitals tab this is the single
+// source for current values and NEWS2, so the chart header hides its read-only
+// vitals strip and advisory banner and defers to the chip + advisory strip here.
+export function VitalsConsole({ encounterId, sets, onRetriage }: { encounterId: string; sets: VitalsSet[]; onRetriage?: () => void }) {
+  const mode = useAppStore((s) => s.mode);
+  const pushToast = useAppStore((s) => s.pushToast);
+  const latest = latestVitals(sets);
+  const [values, setValues] = useState<Record<ConsoleKey, string>>(emptyConsoleValues);
+  const [supplementalO2, setSupplementalO2] = useState(false);
+  const [consciousness, setConsciousness] = useState<Avpu>("Alert");
+  const [gcs, setGcs] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [justSaved, setJustSaved] = useState(false);
+  const [breakdownOpen, setBreakdownOpen] = useState(false);
+  const [historyView, setHistoryView] = useState<"graph" | "flowsheet">("graph");
+  const [graphKey, setGraphKey] = useState<VitalGraphKey>("heartRate");
+  const hydratedSnapshotRef = useRef<ConsoleSnapshot | null>(null);
+
+  // "Saved" confirmation auto-dismisses; clear the timer on unmount / re-save.
+  useEffect(() => {
+    if (!justSaved) return;
+    const timer = window.setTimeout(() => setJustSaved(false), 2500);
+    return () => window.clearTimeout(timer);
+  }, [justSaved]);
+
+  useEffect(() => {
+    if (!latest) return;
+    const next = consoleSnapshotFromVitals(latest);
+    const previous = hydratedSnapshotRef.current;
+    const current: ConsoleSnapshot = { id: previous?.id ?? null, values, supplementalO2, consciousness, gcs };
+    const untouched = previous ? sameConsoleSnapshot(current, previous) : !hasConsoleInput(values, supplementalO2, consciousness, gcs);
+    if (!untouched || previous?.id === latest.id) return;
+    hydratedSnapshotRef.current = next;
+    setValues(next.values);
+    setSupplementalO2(next.supplementalO2);
+    setConsciousness(next.consciousness);
+    setGcs(next.gcs);
+  }, [latest, values, supplementalO2, consciousness, gcs]);
+
+  const parsed = useMemo(() => {
+    const out = {} as Record<ConsoleKey, number | null>;
+    for (const key of Object.keys(values) as ConsoleKey[]) out[key] = parseNumber(values[key]);
+    return out;
+  }, [values]);
+
+  const news = useMemo(
+    () => scoreNews2({
+      respiratoryRate: parsed.respiratoryRate,
+      spo2: parsed.spo2,
+      supplementalO2,
+      temperature: parsed.temperature,
+      systolicBp: parsed.systolicBp,
+      heartRate: parsed.heartRate,
+      consciousness,
+    }),
+    [parsed, supplementalO2, consciousness],
+  );
+  const anyEntered = (Object.keys(values) as ConsoleKey[]).some((key) => values[key].trim() !== "")
+    || supplementalO2 || consciousness !== "Alert" || gcs.trim() !== "";
+  const risk = news2RiskBand(news.score, news.breakdown);
+  // Live advisory follows the same escalation rule as saved sets, but scores from
+  // what is currently typed so it tracks the header chip.
+  const hasSingleThree = Object.values(news.breakdown).some((value) => value >= 3);
+  const advisory = anyEntered
+    ? news.score >= 7
+      ? `NEWS2 ${news.score}: emergency assessment recommended`
+      : news.score >= 5 || hasSingleThree
+        ? `NEWS2 ${news.score}: consider urgent review and re-triage`
+        : null
+    : null;
+
+  function setField(key: ConsoleKey, value: string) {
+    setValues((current) => ({ ...current, [key]: value }));
+  }
+
+  function prefillFromLast() {
+    if (!latest) return;
+    const next = consoleSnapshotFromVitals(latest);
+    hydratedSnapshotRef.current = next;
+    setValues(next.values);
+    setSupplementalO2(next.supplementalO2);
+    setConsciousness(next.consciousness);
+    setGcs(next.gcs);
+  }
+
+  async function save() {
+    if (saving) return;
+    setSaving(true);
+    try {
+      const vitals = await recordVitalsSet(encounterId, {
+        ...parsed,
+        supplementalO2,
+        consciousness,
+        gcsTotal: parseNumber(gcs),
+        source: "full",
+      }, mode);
+      // Keep the values in the inputs after saving so the nurse can continue.
+      setJustSaved(true);
+      pushToast("Vitals saved", () => void deleteVitalsSet(vitals.id, mode));
+    } finally {
+      setSaving(false);
+    }
+  }
 
   return (
-    <section className="card">
-      <div className="mb-3 flex flex-wrap items-center gap-2 border-b border-[var(--color-border)] pb-2">
-        <div className="mr-auto">
-          <h2 className="text-base font-semibold">Vitals and biometrics</h2>
-          <p className="text-xs text-[var(--color-ink-secondary)]">
-            {current
-              ? `Recorded ${new Date(current.recordedAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })} · ${formatAgo(current.recordedAt)}`
-              : "No measurements recorded"}
-          </p>
+    <section className="card space-y-2.5">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-[var(--color-border)] pb-2">
+        <div className="mr-auto flex min-w-0 items-center gap-2">
+          <HeartPulse size={17} className="shrink-0 text-[var(--color-primary)]" />
+          <h2 className="text-base font-semibold">Vitals</h2>
+          <span className="truncate text-xs text-[var(--color-ink-secondary)]">
+            {latest ? `Last recorded ${new Date(latest.recordedAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })} · ${formatAgo(latest.recordedAt)}` : "No measurements yet"}
+          </span>
         </div>
-        <a href="#vitals-history" className="inline-flex min-h-10 items-center px-2 text-sm font-semibold text-[var(--color-primary)]">Vitals history</a>
-        <button type="button" onClick={onRecord} aria-expanded={recording} className="inline-flex min-h-10 items-center rounded-md bg-[var(--color-primary)] px-3 text-sm font-semibold text-white">
-          {recording ? "Close form" : "Record vitals"}
-        </button>
+        <span
+          className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-sm font-bold ${news2ChipClass(risk)}`}
+          title="Live NEWS2 — updates as you type"
+          aria-live="polite"
+        >
+          <Activity size={14} /> NEWS2 {news.score}
+          <span className="text-xs font-semibold uppercase opacity-80">{risk}</span>
+        </span>
+        <a href="#vitals-history" className="inline-flex min-h-9 shrink-0 items-center px-2 text-sm font-semibold text-[var(--color-primary)]">History</a>
       </div>
-      <dl className="grid grid-cols-[repeat(auto-fit,minmax(118px,1fr))] gap-px overflow-hidden rounded-md border border-[var(--color-border)] bg-[var(--color-border)]">
-        {values.map((item) => (
-          <div key={item.label} className={`min-w-0 px-3 py-2 ${summarySeverityClass(item.severity)}`}>
-            <dt className="text-xs font-semibold text-[var(--color-ink-secondary)]">{item.label}</dt>
-            <dd className="mt-0.5 whitespace-nowrap text-base font-semibold tabular-nums">
-              {item.value} <span className="text-xs font-medium text-[var(--color-ink-secondary)]">{item.unit}</span>
-            </dd>
-          </div>
+
+      {advisory && (
+        <div className={`flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md px-2.5 py-1.5 text-sm ${risk === "high" ? "bg-[var(--color-red-tint)] text-[var(--color-red-text)]" : "bg-[var(--color-yellow-tint)] text-[var(--color-yellow-text)]"}`}>
+          <span className="min-w-0 flex-1 font-medium">{advisory}</span>
+          {onRetriage && (
+            <button type="button" onClick={onRetriage} className="shrink-0 rounded border border-current/30 bg-[var(--color-surface)] px-2 py-0.5 text-xs font-semibold text-[var(--color-ink)]">
+              Open re-triage
+            </button>
+          )}
+          <button
+            type="button"
+            aria-expanded={breakdownOpen}
+            onClick={() => setBreakdownOpen((open) => !open)}
+            className="shrink-0 text-xs font-semibold underline"
+          >
+            {breakdownOpen ? "Hide breakdown" : "Score breakdown"}
+          </button>
+          {breakdownOpen && (
+            <div className="flex w-full flex-wrap gap-1 pt-1">
+              {Object.entries(news.breakdown).map(([key, value]) => (
+                <span key={key} className="rounded bg-[var(--color-surface)] px-1.5 py-0.5 text-xs text-[var(--color-ink-secondary)]">{news2BreakdownLabel(key)}: {value}</span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="vitals-tile-grid">
+        {CONSOLE_TILES.map((tile) => (
+          <VitalTile
+            key={tile.key}
+            spec={tile}
+            value={values[tile.key]}
+            band={bandFor(tile.key, parsed[tile.key])}
+            onChange={(value) => setField(tile.key, value)}
+          />
         ))}
-      </dl>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-2 border-t border-[var(--color-border)] pt-3">
+        <div>
+          <span className="mb-1 block text-xs font-bold uppercase text-[var(--color-ink-secondary)]">AVPU</span>
+          <div className="inline-flex overflow-hidden rounded-md border border-[var(--color-border)]" role="group" aria-label="AVPU consciousness">
+            {AVPU_SEGMENTS.map((segment) => (
+              <button
+                key={segment.value}
+                type="button"
+                aria-pressed={consciousness === segment.value}
+                title={segment.value}
+                onClick={() => setConsciousness(segment.value)}
+                className={`min-h-9 w-9 border-l border-[var(--color-border)] text-sm font-bold first:border-l-0 ${
+                  consciousness === segment.value ? "bg-[var(--color-primary)] text-white" : "bg-[var(--color-surface)] text-[var(--color-ink-secondary)] hover:bg-[var(--color-surface-muted)]"
+                }`}
+              >
+                {segment.short}
+              </button>
+            ))}
+          </div>
+        </div>
+        <label className="inline-flex min-h-9 items-center gap-2 rounded-md border border-[var(--color-border)] px-2.5 text-sm font-semibold">
+          <input type="checkbox" checked={supplementalO2} onChange={(event) => setSupplementalO2(event.target.checked)} />
+          Supplemental O2
+        </label>
+        <label className="w-[104px]">
+          <span className="mb-1 block text-xs font-bold uppercase text-[var(--color-ink-secondary)]">GCS</span>
+          <span className="relative block">
+            <input
+              type="number"
+              inputMode="numeric"
+              min={3}
+              max={15}
+              value={gcs}
+              onChange={(event) => setGcs(event.target.value)}
+              placeholder="15"
+              className="min-h-9 w-full rounded-md border border-[var(--color-border)] px-2.5 py-1.5 pr-9 text-sm tabular-nums outline-none focus:border-[var(--color-primary)]"
+            />
+            <span className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-xs font-semibold text-[var(--color-ink-secondary)]">/15</span>
+          </span>
+        </label>
+        <button
+          type="button"
+          onClick={prefillFromLast}
+          disabled={!latest}
+          className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2.5 text-sm font-semibold text-[var(--color-primary)] disabled:opacity-40"
+        >
+          <CopyPlus size={15} /> Prefill from last
+        </button>
+        <div className="ml-auto flex items-center gap-2">
+          {justSaved && (
+            <span className="inline-flex items-center gap-1 text-sm font-semibold text-[var(--color-green-text)]" role="status">
+              <Check size={15} /> Saved
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => void save()}
+            disabled={saving || !anyEntered}
+            className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 text-sm font-semibold text-white disabled:opacity-50"
+          >
+            <Save size={15} /> {saving ? "Saving…" : "Save vitals"}
+          </button>
+        </div>
+      </div>
+
+      <div id="vitals-history">
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <div className="mr-auto inline-flex overflow-hidden rounded-md border border-[var(--color-border)]">
+            <button
+              type="button"
+              aria-pressed={historyView === "graph"}
+              onClick={() => setHistoryView("graph")}
+              className={`inline-flex min-h-9 items-center gap-1 border-r border-[var(--color-border)] px-2.5 text-sm font-semibold ${historyView === "graph" ? "bg-[var(--color-primary)] text-white" : "bg-[var(--color-surface)] text-[var(--color-ink-secondary)]"}`}
+            >
+              <ChartLine size={15} /> Graph
+            </button>
+            <button
+              type="button"
+              aria-pressed={historyView === "flowsheet"}
+              onClick={() => setHistoryView("flowsheet")}
+              className={`min-h-9 px-2.5 text-sm font-semibold ${historyView === "flowsheet" ? "bg-[var(--color-primary)] text-white" : "bg-[var(--color-surface)] text-[var(--color-ink-secondary)]"}`}
+            >
+              Flowsheet
+            </button>
+          </div>
+          {historyView === "graph" && (
+            <DropdownSelect
+              value={graphKey}
+              options={VITAL_GRAPH_PARAMETERS.map((parameter) => ({ value: parameter.key, label: parameter.label }))}
+              onChange={(value) => setGraphKey(value as VitalGraphKey)}
+              className="min-h-9 min-w-[190px] rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 text-sm"
+              ariaLabel="Vital sign graph parameter"
+            />
+          )}
+        </div>
+        {historyView === "graph" ? <VitalsTrendGraph sets={sets} parameterKey={graphKey} /> : <VitalsFlowsheet sets={sets} />}
+      </div>
     </section>
   );
+}
+
+// Compact entry tile: label + status dot, numeric input + unit, quiet range hint.
+// Intentionally holds only what entry needs — history lives in the flowsheet.
+function VitalTile({
+  spec,
+  value,
+  band,
+  onChange,
+}: {
+  spec: ConsoleTileSpec;
+  value: string;
+  band: VitalBand;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className={`rounded-md border px-2.5 py-1.5 transition-colors ${tileBandClass(band)}`}>
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate text-xs font-semibold text-[var(--color-ink-secondary)]">{spec.label}</span>
+        <span className={`h-2 w-2 shrink-0 rounded-full ${dotBandClass(band)}`} aria-hidden="true" />
+      </div>
+      <div className="flex items-baseline gap-1">
+        <input
+          type="number"
+          inputMode="decimal"
+          step={spec.step ?? "1"}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          aria-label={`${spec.label} (${spec.unit})`}
+          className="vitals-tile-input min-h-9 w-full min-w-0 appearance-none border-0 bg-transparent p-0 text-[19px] font-semibold leading-tight tabular-nums text-[var(--color-ink)] outline-none"
+        />
+        <span className="shrink-0 text-xs font-semibold text-[var(--color-ink-secondary)]">{spec.unit}</span>
+      </div>
+      <span className="block truncate text-[11px] text-[var(--color-ink-secondary)]">Normal {spec.hint}</span>
+    </div>
+  );
+}
+
+const emptyConsoleValues: Record<ConsoleKey, string> = {
+  temperature: "",
+  heartRate: "",
+  respiratoryRate: "",
+  spo2: "",
+  systolicBp: "",
+  diastolicBp: "",
+  painScore: "",
+  bloodGlucose: "",
+};
+
+interface ConsoleSnapshot {
+  id: string | null;
+  values: Record<ConsoleKey, string>;
+  supplementalO2: boolean;
+  consciousness: Avpu;
+  gcs: string;
+}
+
+function consoleSnapshotFromVitals(vitals: VitalsSet): ConsoleSnapshot {
+  return {
+    id: vitals.id,
+    values: {
+      temperature: numToInput(vitals.temperature),
+      heartRate: numToInput(vitals.heartRate),
+      respiratoryRate: numToInput(vitals.respiratoryRate),
+      spo2: numToInput(vitals.spo2),
+      systolicBp: numToInput(vitals.systolicBp),
+      diastolicBp: numToInput(vitals.diastolicBp),
+      painScore: numToInput(vitals.painScore),
+      bloodGlucose: numToInput(vitals.bloodGlucose),
+    },
+    supplementalO2: vitals.supplementalO2,
+    consciousness: vitals.consciousness,
+    gcs: numToInput(vitals.gcsTotal),
+  };
+}
+
+function hasConsoleInput(values: Record<ConsoleKey, string>, supplementalO2: boolean, consciousness: Avpu, gcs: string) {
+  return Object.values(values).some((value) => value.trim() !== "") || supplementalO2 || consciousness !== "Alert" || gcs.trim() !== "";
+}
+
+function sameConsoleSnapshot(a: ConsoleSnapshot, b: ConsoleSnapshot) {
+  return a.supplementalO2 === b.supplementalO2
+    && a.consciousness === b.consciousness
+    && a.gcs === b.gcs
+    && (Object.keys(a.values) as ConsoleKey[]).every((key) => a.values[key] === b.values[key]);
+}
+
+function numToInput(value: number | null): string {
+  return value === null ? "" : String(value);
+}
+
+function tileBandClass(band: VitalBand) {
+  if (band === "red") return "border-[var(--color-red-solid)] bg-[var(--color-red-tint)]";
+  if (band === "amber") return "border-[var(--color-yellow-solid)] bg-[var(--color-yellow-tint)]";
+  return "border-[var(--color-border)] bg-[var(--color-surface)]";
+}
+
+function dotBandClass(band: VitalBand) {
+  if (band === "red") return "bg-[var(--color-red-solid)]";
+  if (band === "amber") return "bg-[var(--color-yellow-solid)]";
+  if (band === "normal") return "bg-[var(--color-green-solid)]";
+  return "border border-[var(--color-border-strong)] bg-transparent";
+}
+
+function news2ChipClass(risk: "low" | "medium" | "high") {
+  if (risk === "high") return "bg-[var(--color-red-tint)] text-[var(--color-red-text)]";
+  if (risk === "medium") return "bg-[var(--color-yellow-tint)] text-[var(--color-yellow-text)]";
+  return "bg-[var(--color-green-tint)] text-[var(--color-green-text)]";
+}
+
+const NEWS2_BREAKDOWN_LABELS: Record<string, string> = {
+  respiratoryRate: "RR",
+  spo2: "SpO2",
+  supplementalO2: "O2",
+  temperature: "Temp",
+  systolicBp: "SBP",
+  heartRate: "HR",
+  consciousness: "AVPU",
+};
+
+function news2BreakdownLabel(key: string) {
+  return NEWS2_BREAKDOWN_LABELS[key] ?? key;
+}
+
+function VitalsTrendGraph({ sets, parameterKey }: { sets: VitalsSet[]; parameterKey: VitalGraphKey }) {
+  const parameter = VITAL_GRAPH_PARAMETERS.find((item) => item.key === parameterKey) ?? VITAL_GRAPH_PARAMETERS[0];
+  const points = useMemo(
+    () =>
+      [...sets]
+        .sort((a, b) => a.recordedAt - b.recordedAt)
+        .map((set) => ({ set, value: valueForGraph(set, parameterKey) }))
+        .filter((point): point is { set: VitalsSet; value: number } => point.value !== null),
+    [sets, parameterKey],
+  );
+
+  if (!points.length) {
+    return (
+      <section className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-muted)] px-3 py-3">
+        <h3 className="text-sm font-semibold">Vitals graph</h3>
+        <p className="mt-1 text-sm text-[var(--color-ink-secondary)]">No saved {parameter.label.toLowerCase()} readings yet.</p>
+      </section>
+    );
+  }
+
+  const width = 720;
+  const height = 220;
+  const pad = { top: 18, right: 18, bottom: 34, left: 42 };
+  const values = points.map((point) => point.value);
+  const rawMin = Math.min(...values);
+  const rawMax = Math.max(...values);
+  const spread = Math.max(1, rawMax - rawMin);
+  const min = Math.max(0, Math.floor(rawMin - spread * 0.15));
+  const max = Math.ceil(rawMax + spread * 0.15);
+  const xFor = (index: number) => pad.left + (points.length === 1 ? (width - pad.left - pad.right) / 2 : (index / (points.length - 1)) * (width - pad.left - pad.right));
+  const yFor = (value: number) => pad.top + ((max - value) / Math.max(1, max - min)) * (height - pad.top - pad.bottom);
+  const polyline = points.map((point, index) => `${xFor(index)},${yFor(point.value)}`).join(" ");
+  const latest = points[points.length - 1];
+
+  return (
+    <section className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold">{parameter.label} trend</h3>
+        <span className="rounded bg-[var(--color-primary-tint)] px-2 py-1 text-xs font-bold text-[var(--color-primary)]">
+          Latest {latest.value}{parameter.unit ? ` ${parameter.unit}` : ""} at {new Date(latest.set.recordedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <svg viewBox={`0 0 ${width} ${height}`} className="min-w-[620px] rounded bg-[var(--color-surface-muted)]" role="img" aria-label={`${parameter.label} trend graph`}>
+          <line x1={pad.left} y1={pad.top} x2={pad.left} y2={height - pad.bottom} stroke="var(--color-border-strong)" />
+          <line x1={pad.left} y1={height - pad.bottom} x2={width - pad.right} y2={height - pad.bottom} stroke="var(--color-border-strong)" />
+          {[min, Math.round((min + max) / 2), max].map((tick) => {
+            const y = yFor(tick);
+            return (
+              <g key={tick}>
+                <line x1={pad.left} y1={y} x2={width - pad.right} y2={y} stroke="var(--color-border)" strokeDasharray="4 4" />
+                <text x={pad.left - 8} y={y + 4} textAnchor="end" fontSize="11" fill="var(--color-ink-secondary)">{tick}</text>
+              </g>
+            );
+          })}
+          <polyline fill="none" stroke="var(--color-primary)" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" points={polyline} />
+          {points.map((point, index) => {
+            const x = xFor(index);
+            const y = yFor(point.value);
+            const severity = parameterKey === "news2"
+              ? point.value >= 7 ? "critical" : point.value >= 5 ? "abnormal" : "normal"
+              : severityFor(parameterKey, point.value);
+            return (
+              <g key={`${point.set.id}-${parameterKey}`}>
+                <circle cx={x} cy={y} r={5} fill={graphPointColor(severity)} stroke="var(--color-surface)" strokeWidth="2" />
+                <title>{`${new Date(point.set.recordedAt).toLocaleString()}: ${point.value}${parameter.unit ? ` ${parameter.unit}` : ""}`}</title>
+              </g>
+            );
+          })}
+          {points.map((point, index) => {
+            if (index !== 0 && index !== points.length - 1 && points.length > 4) return null;
+            return (
+              <text key={`${point.set.id}-label`} x={xFor(index)} y={height - 12} textAnchor="middle" fontSize="11" fill="var(--color-ink-secondary)">
+                {new Date(point.set.recordedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+              </text>
+            );
+          })}
+        </svg>
+      </div>
+    </section>
+  );
+}
+
+function valueForGraph(set: VitalsSet, key: VitalGraphKey): number | null {
+  if (key === "news2") return set.news2;
+  return set[key];
+}
+
+function graphPointColor(severity: string) {
+  if (severity === "critical") return "var(--color-red-solid)";
+  if (severity === "abnormal") return "var(--color-yellow-solid)";
+  return "var(--color-primary)";
 }
 
 function RoomChip({ location }: { location: string | null }) {
@@ -371,66 +871,87 @@ export function News2Banner({ latest, onRetriage }: { latest: VitalsSet | null; 
   );
 }
 
+// Compact flowsheet: parameters as rows, timestamps as columns, latest column
+// highlighted, abnormal cells tinted. Trend charts were removed — the tile
+// sparklines cover trend-at-a-glance, and full charts live behind Vitals history.
 export function VitalsFlowsheet({ sets }: { sets: VitalsSet[] }) {
-  const ordered = [...sets].sort((a, b) => a.recordedAt - b.recordedAt);
-  if (!ordered.length) return <div className="card text-sm text-[var(--color-ink-secondary)]">No vitals history yet.</div>;
   const parameters = [
     ["heartRate", "HR"], ["systolicBp", "SBP"], ["diastolicBp", "DBP"], ["spo2", "SpO2"], ["respiratoryRate", "RR"], ["temperature", "Temp"], ["painScore", "Pain"], ["news2", "NEWS2"],
   ] as const;
+  // One column per distinct recorded minute. Two sets saved in the same minute
+  // would otherwise render as identical timestamp columns; collapse them, keeping
+  // the most recent set's values, and tag only the final column "now".
+  const columns = useMemo(() => dedupeFlowsheetColumns(sets), [sets]);
+  const latestKey = columns[columns.length - 1]?.key;
   return (
-    <div className="space-y-3">
-      <section className="card">
-        <h2 className="mb-2 text-sm font-semibold">Trends</h2>
-        <div className="grid grid-cols-3 gap-3 max-[720px]:grid-cols-1">
-          {parameters.filter(([key]) => ["heartRate", "systolicBp", "spo2", "temperature", "respiratoryRate", "news2"].includes(key)).map(([key, label]) => (
-            <Sparkline key={key} label={label} values={ordered.map((set) => Number((set as unknown as Record<string, number | null>)[key] ?? 0))} />
-          ))}
-        </div>
-      </section>
-      <section className="card">
-        <h2 className="mb-2 text-sm font-semibold">Flowsheet</h2>
-        <div className="overflow-x-auto max-[720px]:hidden">
-          <table className="w-full min-w-[760px] border-collapse">
-            <thead>
-              <tr>
-                <th className="px-2 py-1 text-left">Parameter</th>
-                {ordered.map((set) => <th key={set.id} className="px-2 py-1 text-right">{new Date(set.recordedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</th>)}
-              </tr>
-            </thead>
-            <tbody>
-              {parameters.map(([key, label]) => (
-                <tr key={key} className="border-t border-[var(--color-border)]">
-                  <td className="px-2 py-1 font-semibold">{label}</td>
-                  {ordered.map((set) => {
-                    const value = (set as unknown as Record<string, number | null>)[key];
-                    const severity = key === "news2" ? (Number(value) >= 7 ? "critical" : Number(value) >= 5 ? "abnormal" : "normal") : severityFor(key, value);
-                    return <td key={set.id} className={`px-2 py-1 text-right ${severityClass(severity)}`}>{value ?? "-"}</td>;
-                  })}
+    <section>
+      <h3 className="mb-2 text-sm font-semibold">Flowsheet</h3>
+      {!columns.length ? (
+        <p className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-muted)] px-3 py-2 text-sm text-[var(--color-ink-secondary)]">
+          No readings yet — the first saved set will appear here as a column.
+        </p>
+      ) : (
+        <>
+          <div className="vitals-flowsheet-scroll max-[720px]:hidden">
+            <table className="w-full border-collapse text-sm">
+              <thead>
+                <tr>
+                  <th className="vitals-flowsheet-param sticky left-0 z-10 whitespace-nowrap bg-[var(--color-surface)] px-2 py-1 text-left font-semibold text-[var(--color-ink-secondary)]">Parameter</th>
+                  {columns.map((col) => (
+                    <th
+                      key={col.key}
+                      className={`whitespace-nowrap px-2 py-1 text-right font-semibold ${col.key === latestKey ? "bg-[var(--color-primary-tint)] text-[var(--color-primary)]" : "text-[var(--color-ink-secondary)]"}`}
+                    >
+                      {col.label}
+                      {col.key === latestKey && <span className="ml-1 text-[10px] uppercase">now</span>}
+                    </th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <div className="hidden space-y-2 max-[720px]:block">
-          {[...ordered].reverse().map((set) => (
-            <article key={set.id} className="rounded-md border border-[var(--color-border)] p-3">
-              <div className="mb-2 flex items-center justify-between gap-2 text-sm">
-                <time className="font-semibold">{new Date(set.recordedAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</time>
-                <span className={`rounded px-2 py-0.5 text-xs font-bold ${severityClass(set.news2 >= 7 ? "critical" : set.news2 >= 5 ? "abnormal" : "normal")}`}>NEWS2 {set.news2}</span>
-              </div>
-              <dl className="grid grid-cols-3 gap-2 text-sm">
-                <MobileVital label="BP" value={`${set.systolicBp ?? "-"}/${set.diastolicBp ?? "-"}`} />
-                <MobileVital label="HR" value={set.heartRate} />
-                <MobileVital label="SpO2" value={set.spo2} suffix="%" />
-                <MobileVital label="RR" value={set.respiratoryRate} />
-                <MobileVital label="Temp" value={set.temperature} suffix=" C" />
-                <MobileVital label="Pain" value={set.painScore} suffix="/10" />
-              </dl>
-            </article>
-          ))}
-        </div>
-      </section>
-    </div>
+              </thead>
+              <tbody>
+                {parameters.map(([key, label]) => (
+                  <tr key={key} className="border-t border-[var(--color-border)]">
+                    <td className="vitals-flowsheet-param sticky left-0 z-10 whitespace-nowrap bg-[var(--color-surface)] px-2 py-1 font-semibold">{label}</td>
+                    {columns.map((col) => {
+                      const value = (col.set as unknown as Record<string, number | null>)[key];
+                      const severity = key === "news2" ? (Number(value) >= 7 ? "critical" : Number(value) >= 5 ? "abnormal" : "normal") : severityFor(key, value);
+                      const isLatest = col.key === latestKey;
+                      const tint = severityClass(severity);
+                      return (
+                        <td
+                          key={col.key}
+                          className={`whitespace-nowrap px-2 py-1 text-right tabular-nums ${value === null ? "text-[var(--color-ink-secondary)]" : ""} ${tint} ${isLatest && severity === "normal" ? "bg-[var(--color-primary-tint)]" : ""} ${isLatest ? "font-semibold" : ""}`}
+                        >
+                          {value ?? "–"}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="hidden space-y-2 max-[720px]:block">
+            {[...columns].reverse().map(({ key, set }) => (
+              <article key={key} className={`rounded-md border p-3 ${key === latestKey ? "border-[var(--color-primary)]" : "border-[var(--color-border)]"}`}>
+                <div className="mb-2 flex items-center justify-between gap-2 text-sm">
+                  <time className="font-semibold">{new Date(set.recordedAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</time>
+                  <span className={`rounded px-2 py-0.5 text-xs font-bold ${severityClass(set.news2 >= 7 ? "critical" : set.news2 >= 5 ? "abnormal" : "normal")}`}>NEWS2 {set.news2}</span>
+                </div>
+                <dl className="grid grid-cols-3 gap-2 text-sm">
+                  <MobileVital label="BP" value={`${set.systolicBp ?? "-"}/${set.diastolicBp ?? "-"}`} />
+                  <MobileVital label="HR" value={set.heartRate} />
+                  <MobileVital label="SpO2" value={set.spo2} suffix="%" />
+                  <MobileVital label="RR" value={set.respiratoryRate} />
+                  <MobileVital label="Temp" value={set.temperature} suffix=" C" />
+                  <MobileVital label="Pain" value={set.painScore} suffix="/10" />
+                </dl>
+              </article>
+            ))}
+          </div>
+        </>
+      )}
+    </section>
   );
 }
 
@@ -462,26 +983,6 @@ export function CrisisNewsChip({ latest }: { latest: VitalsSet | null }) {
   );
 }
 
-function Sparkline({ label, values }: { label: string; values: number[] }) {
-  const [expanded, setExpanded] = useState(false);
-  const points = useMemo(() => {
-    const max = Math.max(...values, 1);
-    const min = Math.min(...values, 0);
-    const span = Math.max(1, max - min);
-    return values.map((value, index) => `${(index / Math.max(1, values.length - 1)) * 100},${32 - ((value - min) / span) * 28}`).join(" ");
-  }, [values]);
-  return (
-    <button type="button" onClick={() => setExpanded((value) => !value)} className="rounded-md border border-[var(--color-border)] p-2 text-left">
-      <div className="mb-1 text-xs font-bold uppercase text-[var(--color-ink-secondary)]">{label}</div>
-      <svg viewBox="0 0 100 36" className="h-12 w-full">
-        <polyline fill="none" stroke="var(--color-primary)" strokeWidth="2.5" points={points} />
-        {expanded && values.map((value, index) => <circle key={`${value}-${index}`} cx={(index / Math.max(1, values.length - 1)) * 100} cy={Number(points.split(" ")[index]?.split(",")[1] ?? 18)} r="2.2" fill="var(--color-red-solid)" />)}
-      </svg>
-      {expanded && <div className="text-xs text-[var(--color-ink-secondary)]">{values.join(" | ")}</div>}
-    </button>
-  );
-}
-
 function parseValues(values: Record<NumericKey, string>): Record<NumericKey, number | null> {
   return Object.fromEntries(Object.entries(values).map(([key, value]) => [key, parseNumber(value)])) as Record<NumericKey, number | null>;
 }
@@ -507,10 +1008,4 @@ function headerSeverityClass(severity: string) {
   if (severity === "critical") return "rounded bg-[var(--color-red-tint)] px-1.5 text-[var(--color-red-text)]";
   if (severity === "abnormal") return "rounded bg-[var(--color-yellow-tint)] px-1.5 text-[var(--color-yellow-text)]";
   return "";
-}
-
-function summarySeverityClass(severity: string) {
-  if (severity === "critical") return "bg-[var(--color-red-tint)] text-[var(--color-red-text)]";
-  if (severity === "abnormal") return "bg-[var(--color-yellow-tint)] text-[var(--color-yellow-text)]";
-  return "bg-[var(--color-surface)]";
 }

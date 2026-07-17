@@ -2,9 +2,12 @@ import { db } from "./db";
 import { uuid, nextCaseNumber, nextDisplayNumber, nextMrn } from "./ids";
 import { writeAudit } from "./audit";
 import { calculateBmi, implausibleFields, scoreNews2 } from "../lib/vitals";
-import { canTransitionOrderStatus, resultReviewStatus } from "../lib/clinicalWorkflow";
+import { canTransitionOrderStatus, isOrderTerminal, resultReviewStatus } from "../lib/clinicalWorkflow";
 import {
   assertEncounterTransition,
+  canTransitionEncounter,
+  dispositionWorkflowSteps,
+  initialStatusForDisposition,
   legacyStateForWorkflowStatus,
   workflowStatusForEncounter,
   workflowStatusFromLegacy,
@@ -161,6 +164,25 @@ export async function transitionEncounterWorkflowStatus(
     ...params,
     workflowStatus: toStatus,
     enforceWorkflow: true,
+  });
+}
+
+async function moveEncounterToWorkflowStatus(
+  encounterId: string,
+  toStatus: EncounterStatus,
+  params: { reason: string; actor: string; mode: Mode; metadata?: Record<string, unknown> },
+) {
+  const encounter = await db.encounters.get(encounterId);
+  if (!encounter) throw new Error("Encounter not found.");
+  const fromStatus = workflowStatusForEncounter(encounter);
+  if (fromStatus === toStatus) return encounter;
+  if (canTransitionEncounter(fromStatus, toStatus)) {
+    return transitionEncounterWorkflowStatus(encounterId, toStatus, params);
+  }
+  return transitionEncounterState(encounterId, legacyStateForWorkflowStatus(toStatus), {
+    ...params,
+    workflowStatus: toStatus,
+    enforceWorkflow: false,
   });
 }
 
@@ -408,6 +430,9 @@ export interface VitalsInput {
   gcsEye?: number | null;
   gcsVerbal?: number | null;
   gcsMotor?: number | null;
+  // Aggregate GCS from callers that collect a single /15 score rather than the
+  // eye/verbal/motor split; takes precedence over the component sum below.
+  gcsTotal?: number | null;
   source?: VitalsSet["source"];
 }
 
@@ -428,7 +453,8 @@ export async function recordVitalsSet(encounterId: string, input: VitalsInput, m
     heightCm: input.heightCm ?? null,
   };
   const bmi = calculateBmi(values.weightKg, values.heightCm);
-  const gcsTotal = input.gcsEye && input.gcsVerbal && input.gcsMotor ? input.gcsEye + input.gcsVerbal + input.gcsMotor : null;
+  const gcsTotal = input.gcsTotal
+    ?? (input.gcsEye && input.gcsVerbal && input.gcsMotor ? input.gcsEye + input.gcsVerbal + input.gcsMotor : null);
   const news = scoreNews2({
     respiratoryRate: values.respiratoryRate,
     spo2: values.spo2,
@@ -983,24 +1009,23 @@ export async function setDispositionDecision(
   details: string,
   mode: Mode,
 ) {
-  const stateMap: Partial<Record<Disposition, EncounterState>> = {
-    admitted: "admission_pending",
-    icu: "admission_pending",
-    ward: "admission_pending",
-    operating_room: "admission_pending",
-    observation: "observation",
-    transferred: "transfer_pending",
-    discharged: "discharge_pending",
-  };
+  const initialStatus = initialStatusForDisposition(disposition);
   await db.encounters.update(encounterId, {
     disposition,
     closedAt: null,
   });
-  await transitionEncounterState(encounterId, stateMap[disposition] ?? "disposition_pending", {
-    reason: details || `Disposition decision: ${disposition}`,
-    actor,
-    mode,
-  });
+  const reason = details || `Disposition decision: ${disposition}`;
+  if (initialStatus) {
+    const current = await db.encounters.get(encounterId);
+    const currentStatus = current ? workflowStatusForEncounter(current) : null;
+    const operationalTargets: EncounterStatus[] = ["ADMIT_REQUESTED", "DISCHARGE_PENDING", "TRANSFER_PENDING"];
+    if (currentStatus && operationalTargets.includes(initialStatus) && currentStatus !== "DISPOSITION_PENDING" && currentStatus !== initialStatus) {
+      await moveEncounterToWorkflowStatus(encounterId, "DISPOSITION_PENDING", { reason, actor, mode });
+    }
+    await moveEncounterToWorkflowStatus(encounterId, initialStatus, { reason, actor, mode });
+  } else {
+    await moveEncounterToWorkflowStatus(encounterId, "DISPOSITION_PENDING", { reason, actor, mode });
+  }
   return addAuditedClinicalEvent(
     encounterId,
     "disposition",
@@ -1017,24 +1042,56 @@ export async function updateDispositionProgress(
   details: string,
   closesEncounter: boolean,
   mode: Mode,
+  metadata?: Record<string, unknown>,
 ) {
-  if (closesEncounter) {
-    const encounter = await db.encounters.get(encounterId);
-    const terminalState: EncounterState = encounter?.disposition === "transferred" ? "transferred_out" : "closed";
-    await transitionEncounterState(encounterId, terminalState, {
-      reason: details || status,
+  const encounter = await db.encounters.get(encounterId);
+  if (!encounter) throw new Error("Encounter not found.");
+  const steps = dispositionWorkflowSteps(encounter.disposition);
+  const dispositionEvents = await db.clinicalEvents
+    .where("encounterId")
+    .equals(encounterId)
+    .toArray();
+  const latestDecisionAt = dispositionEvents
+    .filter((event) => event.type === "disposition")
+    .reduce((latest, event) => Math.max(latest, event.recordedAt), 0);
+  const timeline = dispositionEvents.filter(
+    (event) => event.type === "disposition_status" && event.recordedAt >= latestDecisionAt,
+  );
+  const completed = new Set(
+    timeline.map((event) => event.content?.status).filter((value): value is string => typeof value === "string"),
+  );
+  if (completed.has(status)) return timeline.find((event) => event.content?.status === status)?.id;
+  const nextStep = steps.find((step) => !completed.has(step.value));
+  if (!nextStep || nextStep.value !== status) {
+    throw new Error(`Complete ${nextStep?.label.toLowerCase() ?? "the current disposition step"} first.`);
+  }
+  if (nextStep.requiresHandoff) {
+    const handoff = metadata?.handoff as Record<string, unknown> | undefined;
+    const required = ["situation", "background", "assessment", "recommendation", "receivingUnit", "receivingClinician"];
+    if (!handoff || required.some((key) => typeof handoff[key] !== "string" || !String(handoff[key]).trim())) {
+      throw new Error("Complete the SBAR handoff and receiving clinician before continuing.");
+    }
+  }
+  if (nextStep.toStatus) {
+    await transitionEncounterWorkflowStatus(encounterId, nextStep.toStatus, {
+      reason: details || nextStep.label,
       actor,
       mode,
+      metadata,
     });
-    await db.encounters.update(encounterId, { closedAt: Date.now() });
   }
-  return addAuditedClinicalEvent(
+  const eventId = await addAuditedClinicalEvent(
     encounterId,
     "disposition_status",
-    { status, actor, details, closesEncounter },
+    { status, actor, details, closesEncounter: nextStep.closesEncounter ?? closesEncounter, ...metadata },
     mode,
     `disposition_${status}`,
   );
+  if (nextStep.closesEncounter ?? closesEncounter) {
+    await db.encounters.update(encounterId, { closedAt: Date.now() });
+    await clearEncounterLocation(encounterId, mode, "Patient departed the emergency department");
+  }
+  return eventId;
 }
 
 export async function assignLocation(
@@ -1106,6 +1163,7 @@ export async function clearEncounterLocation(
   for (const assignment of open) {
     await db.locationAssignments.update(assignment.id, { releasedAt: now });
   }
+  await db.beds.where("encounterId").equals(encounterId).modify({ encounterId: null });
   const prev = (await db.encounters.get(encounterId))?.currentLocationName ?? null;
   await db.encounters.update(encounterId, {
     currentLocationName: null,
@@ -1504,7 +1562,7 @@ export async function addMedication(
 ) {
   const row: MedicationRecord = { ...input, id: uuid(), createdAt: Date.now() };
   await db.medications.add(row);
-  await writeAudit({ entityType: "medication_record", entityId: row.id, action: "medication_added", newValue: row.name, actor: row.prescriber, mode });
+  await writeAudit({ entityType: "medication_record", entityId: row.id, action: "medication_added", newValue: row.name, actor: row.prescriber, patientId: row.patientId, encounterId: row.encounterId, mode });
   return row;
 }
 
@@ -1529,7 +1587,7 @@ export async function addAllergyRecord(
   if (encounter && !encounter.allergies.includes(row.substance)) {
     await db.encounters.update(row.encounterId, { allergies: [...encounter.allergies, row.substance] });
   }
-  await writeAudit({ entityType: "allergy_record", entityId: row.id, action: "allergy_added", newValue: row.substance, actor: row.actor, mode });
+  await writeAudit({ entityType: "allergy_record", entityId: row.id, action: "allergy_added", newValue: row.reaction ? `${row.substance} - ${row.reaction}` : row.substance, actor: row.actor, patientId: row.patientId, encounterId: row.encounterId, mode });
   return row;
 }
 
@@ -1561,7 +1619,7 @@ export async function removeAllergyRecord(id: string, mode: Mode) {
 export async function addCondition(input: Omit<ConditionRecord, "id" | "createdAt">, mode: Mode) {
   const row: ConditionRecord = { ...input, id: uuid(), createdAt: Date.now() };
   await db.conditions.add(row);
-  await writeAudit({ entityType: "condition", entityId: row.id, action: "condition_added", newValue: row.name, mode });
+  await writeAudit({ entityType: "condition", entityId: row.id, action: "condition_added", newValue: row.icd10Code ? `${row.icd10Code} ${row.name}` : row.name, patientId: row.patientId, encounterId: row.encounterId, mode });
   return row;
 }
 
@@ -1589,7 +1647,45 @@ export async function addOrderRecord(
     statusUpdatedBy: input.statusUpdatedBy ?? input.actor,
   };
   await db.orderRecords.add(row);
+  await db.clinicalEvents.add({
+    id: uuid(),
+    encounterId: row.encounterId,
+    type: "order",
+    content: {
+      orderId: row.id,
+      orderType: row.orderType,
+      name: row.name,
+      details: row.details,
+      priority: row.priority,
+      status: row.status,
+      actor: row.actor,
+    },
+    attachmentBlob: null,
+    recordedAt: orderedAt,
+  });
   await writeAudit({ entityType: "order_record", entityId: row.id, action: "order_added", newValue: row.name, actor: row.actor, patientId: row.patientId, encounterId: row.encounterId, mode });
+  const encounter = await db.encounters.get(row.encounterId);
+  if (encounter) {
+    let status = workflowStatusForEncounter(encounter);
+    const actor = row.actor ?? "Ordering clinician";
+    if (status === "ROOMED") {
+      await transitionEncounterWorkflowStatus(row.encounterId, "IN_ASSESSMENT", {
+        reason: "Clinical assessment started with order placement",
+        actor,
+        mode,
+      });
+      status = "IN_ASSESSMENT";
+    }
+    const resultBearingOrder = ["laboratory", "imaging", "procedure", "consultation"].includes(row.orderType);
+    if (status === "IN_ASSESSMENT" && resultBearingOrder) {
+      await transitionEncounterWorkflowStatus(row.encounterId, "AWAITING_RESULTS", {
+        reason: `${row.name} ordered`,
+        actor,
+        mode,
+        metadata: { orderId: row.id, orderType: row.orderType },
+      });
+    }
+  }
   return row;
 }
 
@@ -1633,6 +1729,14 @@ export async function transitionOrderRecordStatus(
   }
 
   await db.orderRecords.update(id, updates);
+  await db.clinicalEvents.add({
+    id: uuid(),
+    encounterId: before.encounterId,
+    type: "order_status",
+    content: { orderId: id, name: before.name, status, actor, reason: transitionReason },
+    attachmentBlob: null,
+    recordedAt: now,
+  });
   await writeAudit({
     entityType: "order_record",
     entityId: id,
@@ -1666,6 +1770,37 @@ export async function addResultRecord(
     reviewStatus: input.reviewStatus ?? "unreviewed",
   };
   await db.resultRecords.add(row);
+  await db.clinicalEvents.add({
+    id: uuid(),
+    encounterId: row.encounterId,
+    type: "result",
+    content: {
+      resultId: row.id,
+      orderId: row.orderId,
+      name: row.name,
+      result: [row.value, row.unit].filter(Boolean).join(" ") || "Result available",
+      critical: row.flag === "critical",
+      flag: row.flag,
+      actor: row.verifiedBy,
+    },
+    attachmentBlob: null,
+    recordedAt: row.resultedAt,
+  });
+  if (row.flag === "critical") {
+    await db.prototypeNotifications.add({
+      id: uuid(),
+      type: `critical_result:${row.id}`,
+      severity: "critical",
+      title: `Critical result: ${row.name}`,
+      message: [row.value, row.unit].filter(Boolean).join(" ") || "Critical value requires acknowledgement",
+      patientId: row.patientId,
+      encounterId: row.encounterId,
+      createdAt: row.resultedAt,
+      readAt: null,
+      acknowledgedAt: null,
+      acknowledgedBy: null,
+    });
+  }
   await writeAudit({ entityType: "result_record", entityId: row.id, action: "result_added", newValue: row.name, actor: row.verifiedBy, patientId: row.patientId, encounterId: row.encounterId, mode });
   if (row.orderId) {
     const order = await db.orderRecords.get(row.orderId);
@@ -1714,6 +1849,18 @@ export async function updateResultRecord(id: string, updates: Partial<ResultReco
   });
 }
 
+async function returnToAssessmentWhenResultsComplete(encounterId: string, actor: string, mode: Mode) {
+  const encounter = await db.encounters.get(encounterId);
+  if (!encounter || workflowStatusForEncounter(encounter) !== "AWAITING_RESULTS") return;
+  const orders = await db.orderRecords.where("encounterId").equals(encounterId).toArray();
+  if (orders.some((order) => !isOrderTerminal(order.status))) return;
+  await transitionEncounterWorkflowStatus(encounterId, "IN_ASSESSMENT", {
+    reason: "All available results reviewed",
+    actor,
+    mode,
+  });
+}
+
 export async function reviewResultRecord(id: string, actor: string, mode: Mode) {
   const before = await db.resultRecords.get(id);
   if (!before) throw new Error("Result not found.");
@@ -1750,6 +1897,7 @@ export async function reviewResultRecord(id: string, actor: string, mode: Mode) 
       await transitionOrderRecordStatus(order.id, "reviewed", actor, mode, "Linked result reviewed");
     }
   }
+  await returnToAssessmentWhenResultsComplete(before.encounterId, actor, mode);
   return { ...before, ...updates };
 }
 
@@ -1796,6 +1944,18 @@ export async function acknowledgeCriticalResultRecord(
       await transitionOrderRecordStatus(order.id, "reviewed", actor, mode, "Linked critical result acknowledged");
     }
   }
+  const notifications = await db.prototypeNotifications
+    .where("encounterId")
+    .equals(before.encounterId)
+    .filter((notification) => notification.type === `critical_result:${before.id}` && notification.acknowledgedAt === null)
+    .toArray();
+  const notificationNow = Date.now();
+  await Promise.all(notifications.map((notification) => db.prototypeNotifications.update(notification.id, {
+    readAt: notification.readAt ?? notificationNow,
+    acknowledgedAt: notificationNow,
+    acknowledgedBy: actor,
+  })));
+  await returnToAssessmentWhenResultsComplete(before.encounterId, actor, mode);
   return { ...before, ...updates };
 }
 
@@ -1808,7 +1968,7 @@ export async function removeResultRecord(id: string, mode: Mode) {
 export async function addImmunization(input: Omit<ImmunizationRecord, "id" | "createdAt">, mode: Mode) {
   const row: ImmunizationRecord = { ...input, id: uuid(), createdAt: Date.now() };
   await db.immunizations.add(row);
-  await writeAudit({ entityType: "immunization", entityId: row.id, action: "immunization_added", newValue: row.vaccine, actor: row.provider, mode });
+  await writeAudit({ entityType: "immunization", entityId: row.id, action: "immunization_added", newValue: row.vaccine, actor: row.provider, patientId: row.patientId, encounterId: row.encounterId, mode });
   return row;
 }
 
@@ -1826,7 +1986,7 @@ export async function removeImmunization(id: string, mode: Mode) {
 export async function addProcedure(input: Omit<ProcedureRecord, "id" | "createdAt">, mode: Mode) {
   const row: ProcedureRecord = { ...input, id: uuid(), createdAt: Date.now() };
   await db.procedures.add(row);
-  await writeAudit({ entityType: "procedure", entityId: row.id, action: "procedure_added", newValue: row.name, actor: row.operator, mode });
+  await writeAudit({ entityType: "procedure", entityId: row.id, action: "procedure_added", newValue: row.name, actor: row.operator, patientId: row.patientId, encounterId: row.encounterId, mode });
   return row;
 }
 
@@ -1862,7 +2022,7 @@ export async function removeProgram(id: string, mode: Mode) {
 export async function addBillingItem(input: Omit<BillingItem, "id" | "createdAt">, mode: Mode) {
   const row: BillingItem = { ...input, id: uuid(), createdAt: Date.now() };
   await db.billingItems.add(row);
-  await writeAudit({ entityType: "billing_item", entityId: row.id, action: "billing_added", newValue: row.description, mode });
+  await writeAudit({ entityType: "billing_item", entityId: row.id, action: "billing_added", newValue: row.description, patientId: row.patientId, encounterId: row.encounterId, mode });
   return row;
 }
 
@@ -1883,7 +2043,7 @@ export async function addAttachment(
 ) {
   const row: Attachment = { ...input, id: uuid(), uploadedAt: input.uploadedAt ?? Date.now() };
   await db.attachments.add(row);
-  await writeAudit({ entityType: "attachment", entityId: row.id, action: "attachment_added", newValue: row.title, actor: row.uploadedBy, mode });
+  await writeAudit({ entityType: "attachment", entityId: row.id, action: "attachment_added", newValue: row.title, actor: row.uploadedBy, patientId: row.patientId, encounterId: row.encounterId, mode });
   return row;
 }
 

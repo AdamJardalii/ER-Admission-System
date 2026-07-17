@@ -16,6 +16,7 @@ import {
   TestTube2,
 } from "lucide-react";
 import { useClinicalEvents, useEncounterView, useTriageAssessments } from "../db/hooks";
+import { workflowStatusForEncounter } from "../domain/encounterStateMachine";
 import type { ClinicalEvent, ClinicalEventType } from "../types";
 
 type JourneyIcon = ComponentType<{ size?: number; className?: string }>;
@@ -50,6 +51,11 @@ export function PatientJourney({ encounterId }: { encounterId: string }) {
     const chronologicalTriage = [...triages].sort((a, b) => a.performedAt - b.performedAt);
     const eventsOf = (...types: ClinicalEventType[]) => chronologicalEvents.filter((event) => types.includes(event.type));
     const firstAt = (...types: ClinicalEventType[]) => eventsOf(...types)[0]?.recordedAt ?? null;
+    const firstStatusAt = (...statuses: string[]) => chronologicalEvents.find((event) => {
+      if (event.type !== "state_transition") return false;
+      const content = (event.content ?? {}) as Record<string, unknown>;
+      return statuses.includes(String(content.toStatus ?? ""));
+    })?.recordedAt ?? null;
     const dispositionAt = firstAt("disposition", "disposition_status");
 
     const stages: JourneyStage[] = [
@@ -63,6 +69,20 @@ export function PatientJourney({ encounterId }: { encounterId: string }) {
       { key: "reassessment", label: "Reassess", icon: RefreshCw, timestamp: firstAt("reassessment"), count: eventsOf("reassessment").length },
       { key: "disposition", label: "Disposition", icon: Signpost, timestamp: dispositionAt, count: eventsOf("disposition", "disposition_status").length },
     ];
+    if (["admitted", "icu", "ward", "operating_room"].includes(view.encounter.disposition ?? "")) {
+      stages.push(
+        { key: "boarding", label: "Boarding", icon: MapPin, timestamp: firstStatusAt("BOARDING") },
+        { key: "handoff", label: "Handoff", icon: ClipboardList, timestamp: firstStatusAt("HANDOFF_PENDING") },
+        { key: "departure", label: "Departure", icon: Check, timestamp: firstStatusAt("DEPARTED_ADMITTED") ?? view.encounter.closedAt },
+      );
+    } else if (view.encounter.disposition === "transferred") {
+      stages.push(
+        { key: "handoff", label: "Handoff", icon: ClipboardList, timestamp: firstStatusAt("HANDOFF_PENDING") },
+        { key: "departure", label: "Departure", icon: Check, timestamp: firstStatusAt("DEPARTED_TRANSFERRED") ?? view.encounter.closedAt },
+      );
+    } else if (view.encounter.disposition === "discharged") {
+      stages.push({ key: "departure", label: "Departure", icon: Check, timestamp: firstStatusAt("DEPARTED_DISCHARGED") ?? view.encounter.closedAt });
+    }
 
     const items: JourneyItem[] = [
       {
@@ -95,8 +115,10 @@ export function PatientJourney({ encounterId }: { encounterId: string }) {
 
   if (!view) return null;
 
-  const firstPending = journey.stages.findIndex((stage) => stage.timestamp === null);
-  const currentStageIndex = firstPending === -1 ? journey.stages.length - 1 : firstPending;
+  const currentStageIndex = journey.stages.reduce(
+    (latest, stage, index) => stage.timestamp !== null ? index : latest,
+    0,
+  );
   const orderCount = events.filter((event) => event.type === "order").length;
 
   return (
@@ -114,7 +136,7 @@ export function PatientJourney({ encounterId }: { encounterId: string }) {
             <JourneyMetric label="Time in ER" value={formatDuration(Date.now() - view.encounter.arrivedAt)} />
             <JourneyMetric label="Events" value={String(journey.items.length)} />
             <JourneyMetric label="Orders" value={String(orderCount)} />
-            <JourneyMetric label="State" value={view.encounter.state.replace(/_/g, " ")} />
+            <JourneyMetric label="State" value={workflowStatusForEncounter(view.encounter).replace(/_/g, " ").toLowerCase()} />
           </div>
         </div>
 
@@ -215,7 +237,7 @@ function eventToJourneyItem(event: ClinicalEvent): JourneyItem {
       return { ...base, label: `Critical alert ${String(content.status || "created")}`, detail: String(content.actionTaken || "Clinician acknowledgement required"), icon: AlertTriangle, tone: content.status === "acknowledged" ? "green" : "red" };
     case "treatment":
     case "medication":
-      return { ...base, label: String(content.name || "Treatment given"), detail: String(content.details || "Administration documented"), icon: HeartPulse, tone: "green" };
+      return { ...base, label: String(content.name || content.medication || "Treatment given"), detail: String(content.details || content.notAdministeredReason || content.response || "Administration documented"), icon: HeartPulse, tone: content.notAdministeredReason ? "yellow" : "green" };
     case "reassessment":
       return { ...base, label: `Reassessment: ${String(content.response || "recorded")}`, detail: `${String(content.notes || "Clinical response reviewed")}${content.painScore !== null && content.painScore !== undefined ? ` | Pain ${String(content.painScore)}/10` : ""}`, icon: RefreshCw, tone: content.response === "worse" ? "red" : content.response === "improved" ? "green" : "yellow" };
     case "location":

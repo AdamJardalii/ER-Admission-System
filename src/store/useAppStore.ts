@@ -44,7 +44,9 @@ function initialTheme(): Theme {
   if (typeof window === "undefined") return "light";
   const stored = window.localStorage.getItem("er-theme");
   if (stored === "light" || stored === "dark") return stored;
-  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  // Default to light regardless of OS preference; a user's explicit choice is
+  // still honored via the stored value above.
+  return "light";
 }
 
 export const useAppStore = create<AppState>((set) => ({

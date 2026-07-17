@@ -1,9 +1,11 @@
-import { useMemo, type ComponentType } from "react";
+import { useEffect, useMemo, useRef, useState, type ComponentType, type RefObject } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Activity,
   AlertCircle,
   BedDouble,
+  ChevronLeft,
+  ChevronRight,
   Clock3,
   Plus,
   Route,
@@ -21,6 +23,7 @@ import {
   useIncompleteRegistrations,
   useZones,
 } from "../../db/hooks";
+import type { EncounterView } from "../../db/hooks";
 import { sortQueue } from "../../lib/sortQueue";
 import { QueueTable } from "../../components/QueueTable";
 import { TriageBadge } from "../../components/TriageBadge";
@@ -52,6 +55,11 @@ export function Dashboard() {
   const now = useNow();
 
   const sorted = sortQueue(activeEncounters);
+  // Persistent safety count for the priority-queue header: ESI-1 or overdue
+  // patients, shown regardless of which page is visible.
+  const priorityCriticalCount = sorted.filter(
+    (row) => row.triage === 1 || isOverdue(row.triage, row.encounter.arrivedAt),
+  ).length;
   const waitingRows = activeEncounters
     .filter((row) => WAITING_STATES.includes(row.encounter.state))
     .sort((a, b) => a.encounter.arrivedAt - b.encounter.arrivedAt);
@@ -106,7 +114,7 @@ export function Dashboard() {
       <section className="dashboard-kpi-grid" aria-label="Emergency department key performance indicators">
         <MetricCard icon={UsersRound} label="Waiting now" value={String(waitingRows.length)} context={`${overdue} overdue`} accent={overdue > 0 ? "var(--color-red-solid)" : "var(--color-primary)"} emphasis={overdue > 0 ? "critical" : undefined} onClick={() => navigate("/queue?view=waiting")} />
         <MetricCard icon={Clock3} label="Average wait" value={formatMinutes(averageWait)} context="Current waiting patients" accent="var(--color-teal-solid)" onClick={() => navigate("/queue?view=waiting")} />
-        <MetricCard icon={Timer} label="Longest wait" value={formatMinutes(longestWait)} context={waitingRows[0]?.patient.name ?? waitingRows[0]?.patient.displayNumber ?? "No queue"} accent="var(--color-yellow-solid)" onClick={() => navigate("/queue?overdue=1")} />
+        <MetricCard icon={Timer} label="Longest wait" value={formatMinutes(longestWait)} context={waitingRows[0]?.patient.name ?? waitingRows[0]?.patient.displayNumber ?? "No queue"} contextIsName accent="var(--color-yellow-solid)" onClick={() => navigate("/queue?overdue=1")} />
         <MetricCard icon={Activity} label="In treatment" value={String(inTreatment)} context={`${activeEncounters.length} active encounters`} accent="var(--color-green-solid)" onClick={() => navigate("/queue?status=in_treatment")} />
         <MetricCard icon={BedDouble} label="Bed occupancy" value={`${occupancy}%`} context={`${beds.length - occupiedBeds} beds open`} accent={occupancy >= 85 ? "var(--color-red-solid)" : "var(--color-primary)"} emphasis={occupancy >= 85 ? "critical" : undefined} onClick={() => navigate("/beds")} />
         <MetricCard icon={Route} label="Disposition pending" value={String(pendingDisposition)} context="Admission, transfer, discharge" accent="var(--color-purple-ai)" onClick={() => navigate("/queue?view=disposition-pending")} />
@@ -219,45 +227,135 @@ export function Dashboard() {
       </div>
 
       <div className="dashboard-work-grid">
-        <section className="dashboard-panel min-w-0">
-          <SectionHeader title="Priority queue" detail={`${activeEncounters.length} active`} />
-          <div className="dashboard-queue-scroll">
-            <QueueTable rows={sorted} compact stickyHeader />
-          </div>
-        </section>
-
-        <section className="dashboard-panel">
-          <SectionHeader title="Waiting longest" detail={`${waitingRows.length} waiting`} />
-          {waitingRows.length === 0 ? (
-            <p className="dashboard-clear-state">No patients currently waiting.</p>
-          ) : (
-            <div className="space-y-0.5">
-              {waitingRows.slice(0, 5).map((row, index) => {
-                const rowOverdue = isOverdue(row.triage, row.encounter.arrivedAt);
-                return (
-                  <button
-                    key={row.encounter.id}
-                    onClick={() => navigate(`/patients/${row.encounter.id}`)}
-                    className={`grid min-h-11 w-full grid-cols-[20px_58px_minmax(0,1fr)_auto] items-center gap-1.5 rounded-md px-1.5 py-1 text-left ${rowOverdue ? "bg-[var(--color-red-tint)] hover:bg-[var(--color-red-tint)]" : "hover:bg-[var(--color-primary-tint)]"}`}
-                  >
-                    <span className="text-xs font-bold tabular-nums text-[var(--color-ink-secondary)]">{index + 1}</span>
-                    <TriageBadge level={row.triage} size="sm" />
-                    <span className="min-w-0">
-                      <span className="block truncate text-sm font-semibold">{row.patient.name ?? row.patient.displayNumber}</span>
-                      <span className="block truncate text-xs text-[var(--color-ink-secondary)]">{row.encounter.chiefComplaint ?? row.encounter.currentLocationName ?? "No complaint"}</span>
-                    </span>
-                    <span className={rowOverdue ? "text-xs font-bold tabular-nums text-[var(--color-red-solid)]" : "text-xs font-semibold tabular-nums"}>
-                      {formatMinutes(minutesSince(row.encounter.arrivedAt, now))}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </section>
+        <PriorityQueuePanel rows={sorted} criticalCount={priorityCriticalCount} />
+        <WaitingLongestPanel rows={waitingRows} now={now} />
       </div>
     </main>
   );
+}
+
+// Bounded, paginated priority-queue panel. Fixed header + column headers stay
+// put; only the row area is bounded to the freed height and paged via a footer
+// pager. The critical (ESI-1 / overdue) count stays in the header on every page.
+function PriorityQueuePanel({ rows, criticalCount }: { rows: EncounterView[]; criticalCount: number }) {
+  const rowAreaRef = useRef<HTMLDivElement>(null);
+  // Compact queue rows are ~51px (two text lines); reserve ~30px for the sticky
+  // column-header row that lives inside the measured area.
+  const perPage = useRowsPerPage(rowAreaRef, 51, 8, 30);
+  const { page, totalPages, pageItems, setPage } = usePagination(rows, perPage);
+  return (
+    <section className="dashboard-panel dashboard-work-panel min-w-0">
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold">Priority queue</h2>
+          {criticalCount > 0 && (
+            <span className="inline-flex items-center gap-1 rounded bg-[var(--color-red-tint)] px-1.5 py-0.5 text-xs font-bold text-[var(--color-red-text)]" title="ESI-1 or overdue patients">
+              <AlertCircle size={12} /> {criticalCount} critical
+            </span>
+          )}
+        </div>
+        <span className="text-xs text-[var(--color-ink-secondary)]">{rows.length} active</span>
+      </div>
+      <div ref={rowAreaRef} className="dashboard-work-rows">
+        <QueueTable rows={pageItems} compact stickyHeader />
+      </div>
+      <Pager page={page} totalPages={totalPages} total={rows.length} unit="active" onPage={setPage} />
+    </section>
+  );
+}
+
+function WaitingLongestPanel({ rows, now }: { rows: EncounterView[]; now: number }) {
+  const navigate = useNavigate();
+  const rowAreaRef = useRef<HTMLDivElement>(null);
+  const perPage = useRowsPerPage(rowAreaRef, 46, 5);
+  const { page, totalPages, pageItems, setPage, pageStart } = usePagination(rows, perPage);
+  return (
+    <section className="dashboard-panel dashboard-work-panel">
+      <SectionHeader title="Waiting longest" detail={`${rows.length} waiting`} />
+      {rows.length === 0 ? (
+        <div ref={rowAreaRef} className="dashboard-work-rows flex items-center justify-center border-0">
+          <p className="dashboard-clear-state">No patients currently waiting.</p>
+        </div>
+      ) : (
+        <div ref={rowAreaRef} className="dashboard-work-rows dashboard-work-rows-scroll border-0">
+          <div className="space-y-0.5">
+            {pageItems.map((row, index) => {
+              const rowOverdue = isOverdue(row.triage, row.encounter.arrivedAt);
+              return (
+                <button
+                  key={row.encounter.id}
+                  onClick={() => navigate(`/patients/${row.encounter.id}`)}
+                  className={`grid min-h-11 w-full grid-cols-[24px_58px_minmax(0,1fr)_auto] items-center gap-1.5 rounded-md px-1.5 py-1 text-left ${rowOverdue ? "bg-[var(--color-red-tint)] hover:bg-[var(--color-red-tint)]" : "hover:bg-[var(--color-primary-tint)]"}`}
+                >
+                  <span className="text-xs font-bold tabular-nums text-[var(--color-ink-secondary)]">{pageStart + index + 1}</span>
+                  <TriageBadge level={row.triage} size="sm" />
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-semibold">{row.patient.name ?? row.patient.displayNumber}</span>
+                    <span className="block truncate text-xs text-[var(--color-ink-secondary)]">{row.encounter.chiefComplaint ?? row.encounter.currentLocationName ?? "No complaint"}</span>
+                  </span>
+                  <span className={rowOverdue ? "text-xs font-bold tabular-nums text-[var(--color-red-solid)]" : "text-xs font-semibold tabular-nums"}>
+                    {formatMinutes(minutesSince(row.encounter.arrivedAt, now))}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      {rows.length > 0 && <Pager page={page} totalPages={totalPages} total={rows.length} unit="waiting" onPage={setPage} />}
+    </section>
+  );
+}
+
+function Pager({ page, totalPages, total, unit, onPage }: { page: number; totalPages: number; total: number; unit: string; onPage: (page: number) => void }) {
+  return (
+    <div className="dashboard-pager">
+      <span className="tabular-nums">Page {page + 1} of {totalPages} · {total} {unit}</span>
+      <div className="flex items-center gap-1.5">
+        <button type="button" className="dashboard-pager-button" onClick={() => onPage(page - 1)} disabled={page <= 0} aria-label="Previous page">
+          <ChevronLeft size={14} /> Prev
+        </button>
+        <button type="button" className="dashboard-pager-button" onClick={() => onPage(page + 1)} disabled={page >= totalPages - 1} aria-label="Next page">
+          Next <ChevronRight size={14} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Page over a list with a stable page index that survives live re-renders.
+// Clamps when the list shrinks so a refresh never lands on an empty page.
+function usePagination<T>(items: T[], perPage: number) {
+  const [page, setPage] = useState(0);
+  const totalPages = Math.max(1, Math.ceil(items.length / perPage));
+  const clampedPage = Math.min(page, totalPages - 1);
+  useEffect(() => {
+    if (page !== clampedPage) setPage(clampedPage);
+  }, [page, clampedPage]);
+  const pageStart = clampedPage * perPage;
+  const pageItems = items.slice(pageStart, pageStart + perPage);
+  return { page: clampedPage, totalPages, pageItems, pageStart, setPage: (next: number) => setPage(Math.max(0, next)) };
+}
+
+// Measure the bounded row area and derive how many rows fit, so the queue fills
+// the freed height (aiming for the 8-10 visible target) instead of a fixed cap.
+// headerAllowance reserves space for a sticky column-header row that lives inside
+// the measured area.
+function useRowsPerPage(ref: RefObject<HTMLElement | null>, rowHeight: number, fallback: number, headerAllowance = 0) {
+  const [perPage, setPerPage] = useState(fallback);
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const measure = () => {
+      const available = element.clientHeight - headerAllowance;
+      if (available > 0) setPerPage(Math.max(1, Math.floor(available / rowHeight)));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [ref, rowHeight, headerAllowance]);
+  return perPage;
 }
 
 function MetricCard({
@@ -267,6 +365,7 @@ function MetricCard({
   context,
   accent,
   emphasis,
+  contextIsName = false,
   onClick,
 }: {
   icon: ComponentType<{ size?: number; className?: string }>;
@@ -275,6 +374,10 @@ function MetricCard({
   context: string;
   accent: string;
   emphasis?: "critical";
+  // When the context is a free-text value (e.g. a patient name) it may be
+  // arbitrarily long; truncate it gracefully with a tooltip. Descriptive
+  // context labels always wrap and are shown in full.
+  contextIsName?: boolean;
   onClick?: () => void;
 }) {
   const Tag = onClick ? "button" : "div";
@@ -286,14 +389,17 @@ function MetricCard({
       style={{ borderLeftColor: accent }}
       aria-label={`${label}: ${value}. ${context}`}
     >
-      <div className="flex min-w-0 items-center gap-1.5 text-xs font-bold uppercase text-[var(--color-ink-secondary)]">
-        <Icon size={14} className="shrink-0" />
+      <strong className="dashboard-kpi-value" style={{ color: accent }}>{value}</strong>
+      <div className="flex min-w-0 items-center gap-1 self-end text-[11px] font-bold uppercase leading-none text-[var(--color-ink-secondary)]">
+        <Icon size={12} className="shrink-0" />
         <span className="truncate" title={label}>{label}</span>
       </div>
-      <div className="mt-1 flex min-w-0 items-baseline gap-2">
-        <strong className="shrink-0 text-xl leading-none tabular-nums" style={{ color: accent }}>{value}</strong>
-        <span className="min-w-0 truncate text-xs text-[var(--color-ink-secondary)]" title={context}>{context}</span>
-      </div>
+      <span
+        className={`self-start text-xs leading-tight text-[var(--color-ink-secondary)] ${contextIsName ? "block truncate" : "dashboard-kpi-context"}`}
+        title={context}
+      >
+        {context}
+      </span>
     </Tag>
   );
 }

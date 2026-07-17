@@ -83,9 +83,10 @@ function App() {
   if (!ready) return <PrototypeStartupState />;
 
   const showCrisisUI = mode === "catastrophe" && isMobile;
+  const routerBasename = import.meta.env.BASE_URL === "/" ? undefined : import.meta.env.BASE_URL.replace(/\/$/, "");
 
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={routerBasename}>
       <div className="min-h-screen flex flex-col">
         {mode === "catastrophe" && <CatastropheBanner />}
         {!showCrisisUI && <WebNav />}

@@ -36,6 +36,64 @@ export const TERMINAL_ENCOUNTER_STATUSES: readonly EncounterStatus[] = [
   "DECEASED",
 ];
 
+export interface DispositionWorkflowStep {
+  value: string;
+  label: string;
+  toStatus?: EncounterStatus;
+  closesEncounter?: boolean;
+  requiresHandoff?: boolean;
+}
+
+export function initialStatusForDisposition(disposition: Disposition): EncounterStatus | null {
+  if (["admitted", "icu", "ward", "operating_room"].includes(disposition)) return "ADMIT_REQUESTED";
+  if (disposition === "transferred") return "TRANSFER_PENDING";
+  if (disposition === "discharged") return "DISCHARGE_PENDING";
+  if (disposition === "observation") return "IN_ASSESSMENT";
+  if (disposition === "left_without_being_seen") return "LWBS";
+  if (disposition === "left_against_medical_advice") return "AMA";
+  if (disposition === "absconded") return "ELOPED";
+  if (disposition === "deceased") return "DECEASED";
+  return null;
+}
+
+export function dispositionWorkflowSteps(disposition: Disposition | null): DispositionWorkflowStep[] {
+  if (["admitted", "icu", "ward", "operating_room"].includes(disposition ?? "")) {
+    return [
+      { value: "specialty_accepted", label: "Specialty accepted", toStatus: "ACCEPTANCE_PENDING" },
+      { value: "bed_assigned", label: "Inpatient bed assigned", toStatus: "BED_ASSIGNED" },
+      { value: "boarding_started", label: "Boarding started", toStatus: "BOARDING" },
+      { value: "handoff_complete", label: "SBAR handoff complete", toStatus: "HANDOFF_PENDING", requiresHandoff: true },
+      { value: "departed_er", label: "Departed ER", toStatus: "DEPARTED_ADMITTED", closesEncounter: true },
+    ];
+  }
+  if (disposition === "transferred") {
+    return [
+      { value: "handoff_complete", label: "SBAR handoff complete", toStatus: "HANDOFF_PENDING", requiresHandoff: true },
+      { value: "ready_for_departure", label: "Ready for departure", toStatus: "READY_FOR_DEPARTURE" },
+      { value: "departed", label: "Patient departed", toStatus: "DEPARTED_TRANSFERRED", closesEncounter: true },
+    ];
+  }
+  if (disposition === "discharged") {
+    return [
+      { value: "instructions_explained", label: "Instructions explained" },
+      { value: "follow_up_arranged", label: "Follow-up arranged" },
+      { value: "ready_for_departure", label: "Ready for departure", toStatus: "READY_FOR_DEPARTURE" },
+      { value: "departed", label: "Patient departed", toStatus: "DEPARTED_DISCHARGED", closesEncounter: true },
+    ];
+  }
+  if (disposition === "observation") {
+    return [
+      { value: "monitoring_started", label: "Monitoring started" },
+      { value: "repeat_tests_due", label: "Repeat tests scheduled" },
+      { value: "new_decision_required", label: "New decision required", toStatus: "DISPOSITION_PENDING" },
+    ];
+  }
+  if (disposition === "unknown_status" || disposition === null) {
+    return [{ value: "confirmed", label: "Outcome reviewed" }];
+  }
+  return [{ value: "confirmed", label: "Outcome confirmed", closesEncounter: true }];
+}
+
 export class InvalidEncounterTransitionError extends Error {
   constructor(from: EncounterStatus, to: EncounterStatus) {
     super(`Encounter cannot move from ${formatEncounterStatus(from)} to ${formatEncounterStatus(to)}.`);
